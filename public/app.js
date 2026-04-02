@@ -100,10 +100,8 @@ function canUseSwitchMode(account, mode) {
 }
 
 function getSwitchStrategy(account) {
-  const preferred = getConfiguredSwitchMode(account);
-  if (canUseSwitchMode(account, preferred)) return preferred;
-  if (preferred !== 'profile' && canUseSwitchMode(account, 'profile')) return 'profile';
-  if (preferred !== 'oauth_logout' && canUseSwitchMode(account, 'oauth_logout')) return 'oauth_logout';
+  if (hasOAuthSwitchReady(account)) return 'oauth_logout';
+  if (Boolean(account?.profileSaved)) return 'profile';
   return 'none';
 }
 
@@ -732,13 +730,15 @@ function updateAccountQuota(accountId, quota) {
   ));
 }
 
-function updateAccountRemoteProfile(accountId, remoteProfile) {
+function updateAccountRemoteProfile(accountId, accountPatch = {}) {
   accounts = accounts.map(acc => (
     acc.id === accountId
       ? {
           ...acc,
-          remoteProfile: { ...(acc.remoteProfile || {}), ...(remoteProfile || {}) },
-          email: remoteProfile?.email || acc.email,
+          ...accountPatch,
+          remoteProfile: { ...(acc.remoteProfile || {}), ...((accountPatch && accountPatch.remoteProfile) || {}) },
+          email: accountPatch?.email || acc.email,
+          label: accountPatch?.label || acc.label,
         }
       : acc
   ));
@@ -843,10 +843,11 @@ async function handleUserInfoRefresh(accountId, button) {
       return;
     }
 
-    updateAccountRemoteProfile(accountId, result.remoteProfile || {});
+    updateAccountRemoteProfile(accountId, result.account || { remoteProfile: result.remoteProfile || {} });
     renderAccounts();
     renderCredentials();
-    showToast(`${acc.label} 用户信息已同步`, 'success');
+    const syncedName = result.account?.label || acc.label;
+    showToast(`${syncedName} 用户信息已同步`, 'success');
   } catch (e) {
     showToast('同步用户信息失败: ' + e.message, 'error');
   } finally {

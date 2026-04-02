@@ -401,11 +401,11 @@ async function refreshStoredRemoteProfile(accountId, meta = readMeta()) {
     createdAt: existing.createdAt || new Date().toISOString(),
   };
 
-  if ((!existing.label || existing.label === `账号 ${accountId}`) && accountInfo?.nickName) {
+  if (accountInfo?.nickName) {
     meta.accounts[accountId].label = accountInfo.nickName;
   }
 
-  return meta.accounts[accountId].remoteProfile;
+  return meta.accounts[accountId];
 }
 
 function extractAccioAuthMetadata(parsedUrl, decodedCookie) {
@@ -1120,9 +1120,9 @@ app.post('/api/accounts/:id/userinfo/refresh', async (req, res) => {
   try {
     const { id } = req.params;
     const meta = readMeta();
-    const remoteProfile = await refreshStoredRemoteProfile(id, meta);
+    const account = await refreshStoredRemoteProfile(id, meta);
     writeMeta(meta);
-    res.json({ success: true, id, remoteProfile });
+    res.json({ success: true, id, account, remoteProfile: account.remoteProfile || null });
   } catch (e) {
     const status = e.message === 'Account not found' ? 404 : 400;
     res.status(status).json({ error: e.message });
@@ -1202,7 +1202,7 @@ app.post('/api/accounts/:id/activate', async (req, res) => {
       }
     }
 
-    if (hasSavedProfile && switchMode !== 'oauth_logout') {
+    if (!hasOAuth && hasSavedProfile && switchMode !== 'oauth_logout') {
       killAccio();
       const fullyStopped = await waitForAccioShutdown(15000);
       if (!fullyStopped) {
