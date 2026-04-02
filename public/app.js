@@ -6,6 +6,7 @@ const API = '';
 let accounts = [];
 let overview = {};
 let currentPage = 'dashboard';
+const VALID_PAGES = new Set(['dashboard', 'accounts', 'credentials', 'quota']);
 
 // ---- Color palette for avatars ---- 
 const AVATAR_COLORS = [
@@ -297,14 +298,52 @@ function showToast(message, type = 'success') {
 }
 
 // ---- Navigation ----
+function normalizePage(page) {
+  return VALID_PAGES.has(page) ? page : 'dashboard';
+}
+
+function buildPageHash(page) {
+  return `#/${normalizePage(page)}`;
+}
+
+function getPageFromLocation() {
+  const hash = window.location.hash || '';
+  const normalizedHash = hash.startsWith('#/') ? hash.slice(2) : hash.startsWith('#') ? hash.slice(1) : hash;
+  return normalizePage(normalizedHash);
+}
+
+function navigateToPage(page) {
+  const targetPage = normalizePage(page);
+  const targetHash = buildPageHash(targetPage);
+
+  if (window.location.hash === targetHash) {
+    switchPage(targetPage);
+    return;
+  }
+
+  window.location.hash = targetHash;
+}
+
+function syncRouteWithPage(page) {
+  const targetHash = buildPageHash(page);
+  if (window.location.hash !== targetHash) {
+    window.location.replace(targetHash);
+  }
+}
+
 function setupNav() {
   const items = document.querySelectorAll('.nav-item');
   items.forEach(item => {
+    const page = normalizePage(item.dataset.page);
+    item.setAttribute('href', buildPageHash(page));
     item.addEventListener('click', (e) => {
       e.preventDefault();
-      const page = item.dataset.page;
-      switchPage(page);
+      navigateToPage(page);
     });
+  });
+
+  window.addEventListener('hashchange', () => {
+    switchPage(getPageFromLocation());
   });
 
   document.getElementById('menu-toggle').addEventListener('click', () => {
@@ -318,15 +357,15 @@ function setupNav() {
 }
 
 function switchPage(page) {
-  currentPage = page;
+  currentPage = normalizePage(page);
   const titles = { dashboard: '总览', accounts: '账号管理', credentials: '凭证中心', quota: '配额管理' };
-  document.getElementById('page-title').textContent = titles[page] || page;
+  document.getElementById('page-title').textContent = titles[currentPage] || currentPage;
 
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById(`page-${page}`).classList.add('active');
+  document.getElementById(`page-${currentPage}`).classList.add('active');
 
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
+  document.querySelector(`.nav-item[data-page="${currentPage}"]`)?.classList.add('active');
 
   document.getElementById('sidebar').classList.remove('open');
 }
@@ -1271,6 +1310,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupNav();
   setupModal();
   setupAccioAuth();
+  syncRouteWithPage(getPageFromLocation());
+  switchPage(getPageFromLocation());
   loadAll().then(() => {
     startPolling();
   });
