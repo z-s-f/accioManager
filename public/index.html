@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accio Manager - 多账号管理</title>
+  <meta name="description" content="Accio AI 助手多账号管理面板 - 凭证管理、配额追踪、账号切换">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon material-icons-round">auto_awesome</span>
+          <span class="logo-text">Accio<span class="logo-accent">Manager</span></span>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard">
+          <span class="material-icons-round">dashboard</span>
+          <span>总览</span>
+        </a>
+        <a href="#" class="nav-item" data-page="accounts" id="nav-accounts">
+          <span class="material-icons-round">group</span>
+          <span>账号管理</span>
+        </a>
+        <a href="#" class="nav-item" data-page="credentials" id="nav-credentials">
+          <span class="material-icons-round">vpn_key</span>
+          <span>凭证中心</span>
+        </a>
+        <a href="#" class="nav-item" data-page="quota" id="nav-quota">
+          <span class="material-icons-round">data_usage</span>
+          <span>配额管理</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="version-badge">
+          <span class="material-icons-round">info</span>
+          <span>v0.5.0 Beta</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+      <!-- Top Bar -->
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <button class="menu-toggle" id="menu-toggle">
+            <span class="material-icons-round">menu</span>
+          </button>
+          <h1 class="page-title" id="page-title">总览</h1>
+        </div>
+        <div class="top-bar-right">
+          <div class="active-account-badge" id="active-account-badge">
+            <span class="pulse-dot"></span>
+            <span id="active-account-label">加载中...</span>
+          </div>
+          <button class="btn btn-sm" id="refresh-btn" title="手动同步 Accio 最新状态" style="background: rgba(255,255,255,0.05); color: var(--text-secondary); display: flex; align-items: center; gap: 4px; border: 1px solid rgba(255,255,255,0.1);">
+            <span class="material-icons-round" style="font-size: 16px;">sync</span> 手动同步
+          </button>
+        </div>
+      </header>
+
+      <!-- Page: Dashboard -->
+      <div class="page active" id="page-dashboard">
+        <div class="stats-grid" id="stats-grid">
+          <!-- Populated by JS -->
+        </div>
+        
+        <!-- Accio Auth Flow -->
+        <div class="oauth-section" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 20px; margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+          <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 14px;">通过 OAuth 流程登录 Accio 服务，自动获取并保存认证文件。</p>
+          
+          <div style="background: var(--bg-input); padding: 12px; border-radius: var(--radius-sm); margin-bottom: 16px; word-break: break-all; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
+            <div style="margin-bottom: 8px; color: var(--text-primary); font-weight: 500;">授权链接:</div>
+            <div id="accio-auth-link" style="user-select: all; min-height: 48px;">正在生成授权链接...</div>
+            
+            <div style="margin-top: 12px; display: flex; gap: 8px;">
+              <button class="btn btn-sm btn-ghost" id="copy-auth-link" style="background: var(--bg-card); border: 1px solid var(--border-color);">复制链接</button>
+              <button class="btn btn-sm btn-ghost" id="open-auth-link" style="background: var(--bg-card); border: 1px solid var(--border-color);">打开链接</button>
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <div style="font-weight: 500; margin-bottom: 8px;">回调 URL</div>
+            <input type="text" id="accio-callback-url" class="form-input" placeholder="http://127.0.0.1:4097/auth/callback?accessToken=...&state=..." style="width: 100%; margin-bottom: 8px;">
+            <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px;">授权完成后，如果浏览器跳转到本地回调页，复制完整 URL 并提交到这里。</div>
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <button class="btn btn-sm" id="submit-callback-url" style="background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-primary);">提交回调 URL</button>
+              <span id="accio-auth-status" style="font-size: 12px; color: var(--text-tertiary); display: none;">等待认证中...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-header" style="justify-content: space-between; display: flex; align-items: flex-end;">
+          <div>
+            <h2>账号快速切换</h2>
+            <p class="section-desc">点击卡片切换当前活动账号</p>
+          </div>
+          <button class="btn btn-primary btn-sm" id="import-auth-btn" style="display: flex; align-items: center; gap: 4px;">
+            <span class="material-icons-round" style="font-size: 16px;">add_link</span> 导入授权链接
+          </button>
+        </div>
+        <div class="accounts-quick-grid" id="quick-switch-grid">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Page: Accounts -->
+      <div class="page" id="page-accounts">
+        <div class="section-header">
+          <h2>所有账号</h2>
+          <p class="section-desc">管理和查看所有 Accio 账号详情</p>
+        </div>
+        <div class="accounts-list" id="accounts-list">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Page: Credentials -->
+      <div class="page" id="page-credentials">
+        <div class="section-header section-header-with-actions">
+          <div>
+            <h2>凭证中心</h2>
+            <p class="section-desc">安全保存每个账号的登录凭证信息</p>
+          </div>
+          <div class="section-actions">
+            <button class="btn btn-sm btn-ghost" id="credentials-batch-switch-btn" title="批量设置账号切换方式">
+              <span class="material-icons-round">tune</span> 批量设置切换方式
+            </button>
+          </div>
+        </div>
+        <div class="credentials-grid" id="credentials-grid">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Page: Quota -->
+      <div class="page" id="page-quota">
+        <div class="section-header section-header-with-actions">
+          <div>
+            <h2>配额管理</h2>
+            <p class="section-desc">追踪和管理每个账号的使用配额</p>
+          </div>
+          <div class="section-actions">
+            <button class="btn btn-sm btn-ghost" id="quota-bulk-refresh-btn" title="批量通过远端接口刷新各账号配额">
+              <span class="material-icons-round">sync</span> 批量刷新
+            </button>
+          </div>
+        </div>
+        <div class="quota-grid" id="quota-grid">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">编辑账号</h3>
+        <button class="icon-btn modal-close" id="modal-close">
+          <span class="material-icons-round">close</span>
+        </button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <!-- Dynamic content -->
+      </div>
+      <div class="modal-footer" id="modal-footer">
+        <button class="btn btn-ghost" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

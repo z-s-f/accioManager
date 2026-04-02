@@ -1,0 +1,16 @@
+.ace-tool/
+.idea/
+.DS_Store
+
+node_modules/
+data/
+logs/
+*.log
+
+.env
+.env.*
+!.env.example
+
+config/*.local.*
+config/*.secret.*
+config/private/

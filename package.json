@@ -1,0 +1,15 @@
+{
+  "name": "accio-manager",
+  "version": "1.0.0",
+  "description": "Accio Multi-Account Manager - Manage, switch and track your Accio accounts",
+  "license": "MIT",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "jsonc-parser": "^3.3.1"
+  }
+}
