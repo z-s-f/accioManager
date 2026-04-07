@@ -1,12 +1,13 @@
 {
   "name": "accio-manager",
-  "version": "1.0.0",
+  "version": "0.5.0",
   "description": "Accio Multi-Account Manager - Manage, switch and track your Accio accounts",
   "license": "MIT",
   "main": "main.js",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js",
+    "server": "node server.js",
+    "start": "electron .",
     "electron:dev": "electron .",
     "electron:build": "electron-builder",
     "build:win": "electron-builder --win",

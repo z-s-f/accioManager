@@ -23,7 +23,9 @@ const PROFILES_DIR = path.join(DATA_ROOT, 'profiles');
 const SDK_LOG = path.join(ACCIO_DIR, 'logs', 'sdk.log');
 const UTDID_FILE = path.join(ACCIO_DIR, 'utdid');
 const REGISTER_OAUTH_BRIDGE_FILE = path.join(DATA_ROOT, 'register', 'oauth_bridge_queue.json');
-const ACCIO_AUTH_CALLBACK = 'http://127.0.0.1:3456/auth/callback';
+// NOTE: PORT is set by Electron's main.js (process.env.PORT = '3000') BEFORE
+// requiring this module, so reading it here gives the correct runtime value.
+const ACCIO_AUTH_CALLBACK = `http://127.0.0.1:${process.env.PORT || 3456}/auth/callback`;
 const ACCIO_LOGIN_URL = 'https://www.accio.com/login?language=en_US';
 const ACCIO_GATEWAY_ORIGIN = 'https://phoenix-gw.alibaba.com';
 const ACCIO_MTOP_ORIGIN = 'https://acs.h.accio.com';
@@ -95,11 +97,6 @@ function readSettings() {
   } catch { return {}; }
 }
 
-function getFetchTimeoutSignal(timeoutMs) {
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), timeoutMs);
-  return controller.signal;
-}
 
 function safeDecode(value) {
   if (!value) return value;
@@ -146,11 +143,15 @@ function getAllAccountIds(meta = readMeta()) {
   return Array.from(new Set([...accountDirs, ...Object.keys(meta.accounts || {})]));
 }
 
+// AbortSignal.timeout() is available in Node 17.3+. Fall back to AbortController for older runtimes.
 function getFetchTimeoutSignal(ms) {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
     return AbortSignal.timeout(ms);
   }
-  return undefined;
+  // Fallback: manually abort via AbortController
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
 }
 
 function readUtdid() {
@@ -365,14 +366,21 @@ async function fetchAccioPoints(credentials = {}) {
         'x-cna': gatewayContext.cna,
         ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
       },
-      signal: getFetchTimeoutSignal(5000),
+      signal: getFetchTimeoutSignal(10000), // 增加到 10 秒
     });
 
-    if (!fetchRes.ok) return null;
+    if (!fetchRes.ok) {
+      console.warn(`[DEBUG Points ERR] HTTP ${fetchRes.status}`);
+      return null;
+    }
     const payload = await fetchRes.json();
-    console.log('[Points] Raw /api/entitlement/point response:', JSON.stringify(payload?.data));
+    
+    // DEBUG: 专门开启积分明细数据抓取
+    console.log('[DEBUG Points RAW] Remote Payload:', JSON.stringify(payload, null, 2));
+
     return (payload && payload.success) ? payload.data : null;
   } catch (e) {
+    console.error('[DEBUG Points EXCEPTION]', e.message);
     return null;
   }
 }
@@ -401,19 +409,21 @@ async function fetchAccioQuota(credentials = {}) {
         'x-cna': gatewayContext.cna,
         ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
       },
-      signal: getFetchTimeoutSignal(5000),
+      signal: getFetchTimeoutSignal(10000), // 增加到 10 秒
     });
 
     if (!fetchRes.ok && !pointData) return null;
     const payload = fetchRes.ok ? await fetchRes.json() : { success: true, data: {} };
+    
+    // DEBUG: 专门开启原始 API 数据抓取
+    console.log('[DEBUG Quota RAW] Remote Payload:', JSON.stringify(payload, null, 2));
+
     if (!payload || !payload.success) {
       if (!pointData) return null;
     }
 
-    // Merge: point API data on top of quota API data (point data is more detailed)
+    // Merge: point API data on top of quota API data
     const raw = { ...(payload.data || {}), ...(pointData || {}) };
-
-    console.log('[Quota] Raw merged API data:', JSON.stringify(raw));
 
     const refreshCountdownSeconds = Number(raw.refreshCountdownSeconds ?? raw.countdown ?? raw.nextRefreshSeconds);
 
@@ -455,9 +465,9 @@ async function fetchAccioQuota(credentials = {}) {
     }
     // --- Strategy 2: flat named sub-objects (including new API entitlement) ---
     else {
-      const basicRaw      = raw.entitlement?.daily   || raw.basic      || raw.basePoint  || raw.dailyPoint || raw.todayPoint || {};
-      const limitedRaw    = raw.entitlement?.monthly || raw.limited    || raw.limitedTime || raw.timedPoint || raw.tempPoint  || {};
-      const supplementRaw = raw.entitlement?.referral|| raw.supplement || raw.gift        || raw.bonusPoint || raw.extraPoint || {};
+      const basicRaw      = raw.entitlement?.daily   || raw.dailyQuota   || raw.basic      || raw.basePoint  || raw.dailyPoint || raw.todayPoint || {};
+      const limitedRaw    = raw.entitlement?.monthly || raw.limitedQuota || raw.limited    || raw.limitedTime || raw.timedPoint || raw.tempPoint  || {};
+      const supplementRaw = raw.entitlement?.referral|| raw.bonusQuota   || raw.supplement || raw.gift        || raw.bonusPoint || raw.extraPoint || {};
 
       const b = parsePointComponent(basicRaw);
       const l = parsePointComponent(limitedRaw);
@@ -474,11 +484,11 @@ async function fetchAccioQuota(credentials = {}) {
     }
 
     // --- Strategy 3: top-level total/used (fallback or override) ---
-    const rawTotal = Number(raw.total ?? raw.totalPoint ?? raw.quota ?? raw.totalQuota ?? 0);
-    let rawUsed  = Number(raw.used  ?? raw.usedPoint  ?? raw.consume ?? raw.usedQuota ?? 0);
+    const rawTotal = Number(raw.total ?? raw.totalPoint ?? raw.totalPoints ?? raw.quota ?? raw.totalQuota ?? 0);
+    let rawUsed  = Number(raw.used  ?? raw.usedPoint  ?? raw.usedPoints  ?? raw.consume ?? raw.usedQuota ?? 0);
     
     // New Accio API uses `remaining` instead of `used`
-    if (raw.remaining !== undefined && raw.used === undefined && raw.usedPoint === undefined && raw.consume === undefined) {
+    if (raw.remaining !== undefined && raw.used === undefined && raw.usedPoint === undefined && raw.consume === undefined && raw.usedPoints === undefined) {
       rawUsed = Math.max(0, rawTotal - Number(raw.remaining || 0));
     }
     

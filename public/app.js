@@ -1232,6 +1232,8 @@ function openModal(title) {
   cancelBtn.textContent = '取消';
   saveBtn.style.display = 'inline-flex';
   saveBtn.textContent = '保存';
+  saveBtn.style.background = '';
+  saveBtn.style.color = '';
   saveBtn.onclick = null;
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('modal-overlay').onclick = (e) => {
@@ -1573,8 +1575,11 @@ function updateActiveBadge() {
   badge.textContent = active ? active.label : '未选择账号';
 }
 
+let pollingIntervalId = null;
+
 function startPolling() {
-  setInterval(async () => {
+  if (pollingIntervalId) return; // Already polling
+  pollingIntervalId = setInterval(async () => {
     try {
       const res = await fetch(`${API}/api/status`);
       const status = await res.json();
@@ -1587,6 +1592,13 @@ function startPolling() {
       // Ignore network errors in background poll
     }
   }, 3000); // Check every 3 seconds
+}
+
+function stopPolling() {
+  if (pollingIntervalId) {
+    clearInterval(pollingIntervalId);
+    pollingIntervalId = null;
+  }
 }
 
 function openImportModal() {
@@ -1826,8 +1838,12 @@ document.addEventListener('DOMContentLoaded', () => {
     startPolling();
   });
 
-  // Desktop OAuth Auto-Persistence Listener
+  // Desktop OAuth Auto-Persistence Listener — registered only once
   if (window.electronAPI && typeof window.electronAPI.onOAuthSuccess === 'function') {
+    // Remove any previous listener to prevent stacking on hot reloads
+    if (window.electronAPI.removeOAuthSuccessListener) {
+      window.electronAPI.removeOAuthSuccessListener();
+    }
     window.electronAPI.onOAuthSuccess(async (data) => {
       console.log('[Desktop] OAuth Success triggered via IPC:', data.url);
       showToast('自动抓取到认证跳转，正在同步账号...', 'info');

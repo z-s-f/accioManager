@@ -215,17 +215,44 @@ function createWindow() {
     win.webContents.on('did-navigate', (event, url) => {
       handleNav(url, win);
     });
+    // Catch HTTP redirect chains (e.g. Accio login → 302 → localhost:3456/auth/callback)
+    win.webContents.on('did-redirect-navigation', (event, url) => {
+      handleNav(url, win);
+    });
   });
 
   function handleNav(url, win) {
-    if (url.includes('/auth/callback') && url.includes('accessToken=')) {
-      console.log('[Main] Detected OAuth callback in window, importing automatically...');
-      // Notify the frontend to refresh
-      if (mainWindow) {
-        mainWindow.webContents.send('oauth-success', { url });
-      }
-      // Auto-close the auth window after the callback is captured
-      // so stale "logged-in" windows don't accumulate
+    let parsedUrl;
+    try { parsedUrl = new URL(url); } catch { return; }
+
+    // Case 1: The OAuth window was redirected to our local Express server callback.
+    // Express already saved the account — we just need to notify the frontend.
+    const isLocalCallback =
+      (parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === 'localhost') &&
+      parsedUrl.pathname === '/auth/callback' &&
+      parsedUrl.searchParams.has('accessToken');
+
+    // Case 2: Legacy — accio.com or the desktop protocol echoes back the callback URL
+    // with accessToken directly visible in the URL bar.
+    const isRemoteCallback =
+      url.includes('/auth/callback') &&
+      url.includes('accessToken=') &&
+      !isLocalCallback;
+
+    if (isLocalCallback || isRemoteCallback) {
+      console.log('[Main] Detected OAuth callback, notifying frontend to refresh...');
+
+      // For the local callback: Express already imported the account;
+      // just tell the frontend to reload. We delay slightly so Express
+      // has time to finish writing the file before the frontend re-fetches.
+      const notifyDelay = isLocalCallback ? 800 : 0;
+      setTimeout(() => {
+        if (mainWindow) {
+          mainWindow.webContents.send('oauth-success', { url });
+        }
+      }, notifyDelay);
+
+      // Auto-close the auth window
       setTimeout(() => {
         if (!win.isDestroyed()) win.close();
       }, 1500);

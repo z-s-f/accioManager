@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close: () => ipcRenderer.send('window-close'),
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
   onOAuthSuccess: (callback) => ipcRenderer.on('oauth-success', (event, data) => callback(data)),
+  removeOAuthSuccessListener: () => ipcRenderer.removeAllListeners('oauth-success'),
   selectDirectory: () => ipcRenderer.invoke('select-directory')
 });
 
