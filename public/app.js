@@ -2,7 +2,7 @@
 // Accio Manager – Frontend Application
 // =============================================
 
-const API = '';
+const API = window.electronAPI ? 'http://localhost:3000' : '';
 let accounts = [];
 let overview = {};
 let currentPage = 'dashboard';
@@ -202,7 +202,7 @@ function getAuthFacts(acc) {
 async function fetchAccounts() {
   const res = await fetch(`${API}/api/accounts`);
   const data = await res.json();
-  accounts = data.accounts;
+  accounts = data.accounts || [];
   return data;
 }
 
@@ -401,42 +401,91 @@ function renderDashboard() {
 
 function renderQuickSwitch() {
   const grid = document.getElementById('quick-switch-grid');
-  grid.innerHTML = accounts.map((acc, idx) => {
+  if (!grid) return;
+
+  // Sort: active first, then by remaining quota (highest first)
+  const usableAccounts = accounts
+    .filter(acc => !acc.disabled)
+    .sort((a, b) => {
+      if (a.isActive && !b.isActive) return -1;
+      if (!a.isActive && b.isActive) return 1;
+      const getRemainingPct = (q) => {
+        if (!q || !q.checkedAt) return -1;
+        if (q.total > 0) return (q.total - q.used) / q.total;
+        // usagePercent is the % used: 0 = none used = max remaining
+        if (Number.isFinite(q.usagePercent)) return 1 - q.usagePercent / 100;
+        return -1;
+      };
+      return getRemainingPct(b.quota) - getRemainingPct(a.quota);
+    });
+
+  grid.innerHTML = usableAccounts.length === 0 ? `
+    <div style="grid-column: 1/-1; padding: 40px; text-align: center; color: var(--text-tertiary);">
+      没有可用的账号，请先在"账号管理"中启用或添加账号。
+    </div>
+  ` : usableAccounts.map((acc, idx) => {
     const bg = getAvatarColor(idx);
     const initial = getAvatarInitial(acc);
-    const switchStrategy = getSwitchStrategy(acc);
-    const profileIcon = acc.profileSaved
-      ? '<span class="material-icons-round" style="font-size:14px;color:var(--success);" title="配置已保存">cloud_done</span>'
-      : '<span class="material-icons-round" style="font-size:14px;color:var(--text-tertiary);" title="配置未保存">cloud_off</span>';
+    const quota = acc.quota || {};
+    const hasPoints = Number.isFinite(quota.total) && quota.total > 0;
+    const hasPercent = Number.isFinite(quota.usagePercent);
+    const hasQuotaData = !!quota.checkedAt;
+
+    // Remaining percent for progress bar display (how much is LEFT)
+    let remainPct = 0;
+    let remainLabel = '—';
+    let unitLabel = quota.unit || '积分';
+    if (hasPoints) {
+      const remain = Math.max(0, quota.total - quota.used);
+      remainPct = Math.round((remain / quota.total) * 100);
+      remainLabel = remain.toLocaleString();
+    } else if (hasPercent) {
+      // usagePercent = % used, remaining = 100 - usagePercent
+      remainPct = Math.max(0, Math.round(100 - quota.usagePercent));
+      remainLabel = remainPct + '%';
+      unitLabel = '剩余';
+    }
+
+    const progressLevel = !hasQuotaData ? 'safe' : (remainPct > 50 ? 'safe' : (remainPct > 20 ? 'warning' : 'danger'));
 
     return `
-      <div class="quick-card ${acc.isActive ? 'active' : ''}" data-id="${acc.id}">
+      <div class="quick-card ${acc.isActive ? 'active' : ''}">
         <div class="quick-card-header">
           <div class="quick-card-avatar" style="background: ${bg}">${initial}</div>
           <div style="display:flex;align-items:center;gap:8px;">
-            ${profileIcon}
+            ${acc.profileSaved ? '<span class="material-icons-round" style="font-size:14px;color:var(--success);" title="本地配置已就绪">verified</span>' : ''}
             <span class="quick-card-status ${acc.isActive ? 'active' : 'inactive'}">
               ${acc.isActive ? '● 活动中' : '○ 未激活'}
             </span>
           </div>
         </div>
-        <div class="quick-card-label">${acc.label}</div>
-        <div class="quick-card-id">${acc.isGuest ? 'guest' : 'ID: ' + acc.id}</div>
-        <div class="quick-card-stats">
-          <div class="quick-stat"><div class="quick-stat-value">${acc.stats.conversations}</div><div class="quick-stat-label">对话</div></div>
-          <div class="quick-stat"><div class="quick-stat-value">${acc.stats.agents}</div><div class="quick-stat-label">代理</div></div>
-          <div class="quick-stat"><div class="quick-stat-value">${acc.stats.tasks}</div><div class="quick-stat-label">任务</div></div>
-          <div class="quick-stat"><div class="quick-stat-value">${acc.stats.connectors.length}</div><div class="quick-stat-label">连接器</div></div>
+        <div class="quick-card-content" style="cursor:pointer;" onclick="openSwitchConfirmModalByAccount('${acc.id}')">
+          <div class="quick-card-label">${acc.label || '未命名账号'}</div>
+          <div class="quick-card-id-row">
+            <span>ID: ${acc.id.substring(0, 10)}</span>
+            <span>${quota.checkedAt ? formatDateTime(quota.checkedAt) : '未同步'}</span>
+          </div>
         </div>
-        <div class="quick-card-actions" style="display:flex;gap:8px;margin-top:12px;">
-          ${acc.isActive
-            ? `<button class="btn btn-sm btn-ghost" style="flex:1" onclick="event.stopPropagation();handleSaveProfile('${acc.id}')">
-                <span class="material-icons-round">save</span>保存当前配置
-              </button>`
-            : `<button class="btn btn-sm btn-primary" style="flex:1" onclick="event.stopPropagation();handleSwitch('${acc.id}')" ${switchStrategy === 'none' ? 'title="需要先导入 OAuth 回调或保存本地配置"' : ''} ${switchStrategy === 'none' ? 'disabled' : ''}>
-                <span class="material-icons-round">${getSwitchActionIcon(acc)}</span>${getSwitchActionLabel(acc)}
-              </button>`
-          }
+
+        <div class="quick-card-quota-compact">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-size:11px; color:var(--text-tertiary);">剩余可用量</span>
+            <span style="font-size:12px; font-weight:600; color:${!hasQuotaData ? 'var(--text-tertiary)' : (remainPct > 20 ? 'var(--text-secondary)' : 'var(--error)')}">
+              ${hasQuotaData ? remainLabel : '未同步'} <small>${hasQuotaData ? unitLabel : ''}</small>
+            </span>
+          </div>
+          <div class="quota-progress-bar" style="height:6px; background:rgba(255,255,255,0.05);">
+            <div class="quota-progress-fill ${progressLevel}" style="width: ${hasQuotaData ? remainPct : 60}%;"></div>
+          </div>
+        </div>
+
+        <div class="quick-card-actions" style="margin-top:16px; display:grid; grid-template-columns: 1fr auto; gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="handleQuickSwitch('${acc.id}')" style="height:32px; font-size:12px; font-weight:600; background: ${acc.isActive ? 'rgba(255,255,255,0.05)' : 'var(--accent)'}; border:none; ${acc.isActive ? 'color:var(--text-tertiary);' : ''}" ${acc.isActive ? 'disabled' : ''}>
+            ${acc.isActive ? '当前已登录' : (acc.profileSaved ? '🚀 快速登录' : '⚡️ 尝试切换')}
+          </button>
+          <button class="btn btn-sm" onclick="openSwitchConfirmModalByAccount('${acc.id}')" style="height:32px; width:32px; padding:0; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.05); color:var(--text-tertiary);" title="切换选项">
+            <span class="material-icons-round" style="font-size:18px;">more_horiz</span>
+          </button>
         </div>
       </div>
     `;
@@ -546,6 +595,16 @@ function openSwitchConfirmModal(acc) {
   };
 }
 
+async function promptDisableOnError(id, errorMsg) {
+  const confirmed = await showConfirm('账号操作提示', `${errorMsg}\n\n该账号操作失败，是否立即禁用此账号以便在列表中排除？`, {
+    type: 'warning',
+    confirmText: '禁用并排除'
+  });
+  if (confirmed) {
+    await toggleAccountDisabled(id);
+  }
+}
+
 async function executeSwitch(id, strategy) {
   try {
     showToast(
@@ -567,10 +626,78 @@ async function executeSwitch(id, strategy) {
       }
     } else {
       showToast(result.error || '切换失败', 'error');
+      await promptDisableOnError(id, `切换账号失败: ${result.error || '未知错误'}`);
     }
     await loadAll();
   } catch (e) {
     showToast('切换失败: ' + e.message, 'error');
+    await promptDisableOnError(id, `切换操作发生网络错误: ${e.message}`);
+  }
+}
+
+async function handleRefreshUserInfo(id) {
+  try {
+    showToast('正在同步用户信息...', 'info');
+    const result = await refreshAccountUserInfo(id);
+    if (result.success) {
+      showToast('用户信息同步成功', 'success');
+      await loadAll();
+    } else {
+      showToast(result.error || '同步失败', 'error');
+      await promptDisableOnError(id, `同步用户信息失败: ${result.error || 'Token 可能已失效'}`);
+    }
+  } catch (e) {
+    showToast('同步错误: ' + e.message, 'error');
+    await promptDisableOnError(id, `网络请求失败: ${e.message}`);
+  }
+}
+
+async function handleRefreshQuota(id) {
+  try {
+    showToast('正在刷新配额用法...', 'info');
+    const result = await refreshAccountQuota(id);
+    if (result.success) {
+      showToast('配额刷新成功', 'success');
+      await loadAll();
+    } else {
+      showToast(result.error || '刷新失败', 'error');
+      await promptDisableOnError(id, `刷新可用量失败: ${result.error || '认证已失效'}`);
+    }
+  } catch (e) {
+    showToast('刷新错误: ' + e.message, 'error');
+    await promptDisableOnError(id, `配额刷新网络错误: ${e.message}`);
+  }
+}
+
+async function toggleAccountDisabled(id) {
+  try {
+    const res = await fetch(`${API}/api/accounts/${id}/toggle-disabled`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.disabled ? '账号已禁用' : '账号已启用', 'info');
+      await loadAll();
+    }
+  } catch (e) {
+    showToast('操作失败: ' + e.message, 'error');
+  }
+}
+
+async function deleteAccount(id) {
+  const confirmed = await showConfirm('确认彻底删除', '确定要删除该账号吗？关联的数据和配置将被移除且无法恢复。', {
+    type: 'error',
+    danger: true,
+    confirmText: '立即彻底删除'
+  });
+  if (!confirmed) return;
+  try {
+    const res = await fetch(`${API}/api/accounts/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      showToast('账号已从列表中移除', 'success');
+      await loadAll();
+    }
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error');
   }
 }
 
@@ -586,59 +713,89 @@ async function handleSwitch(id) {
   openSwitchConfirmModal(acc);
 }
 
+async function handleQuickSwitch(id) {
+  const acc = accounts.find(a => a.id === id);
+  if (!acc || acc.isActive) return;
+  const strategy = getSwitchStrategy(acc);
+  await executeSwitch(id, strategy);
+}
+
+function openSwitchConfirmModalByAccount(id) {
+  handleSwitch(id);
+}
+
 // ---- Render Accounts ----
 function renderAccounts() {
-  const list = document.getElementById('accounts-list');
-  list.innerHTML = accounts.map((acc, idx) => {
+  const container = document.getElementById('accounts-list');
+  if (!container) return;
+  
+  container.className = 'accounts-grid'; // Use the optimized grid class
+
+  container.innerHTML = accounts.map((acc, idx) => {
     const bg = getAvatarColor(idx);
     const initial = getAvatarInitial(acc);
-    const connectors = acc.stats.connectors.map(c => `<span class="account-meta-item"><span class="material-icons-round">link</span>${c}</span>`).join('');
-    const switchStrategy = getSwitchStrategy(acc);
-    const userInfoReady = canRefreshUserInfo(acc);
-    const profileBadge = acc.profileSaved
-      ? '<span class="tag" style="background:rgba(61,220,132,0.1);color:#3ddc84;">配置已保存</span>'
-      : '<span class="tag" style="background:rgba(255,183,77,0.1);color:#ffb74d;">未保存配置</span>';
-    const oauthBadge = hasOAuthSwitchReady(acc)
-      ? '<span class="tag" style="background:rgba(52,211,153,0.14);color:#34d399;">OAuth 可切换</span>'
-      : '';
+    const quota = acc.quota || { total: 0, used: 0 };
+    const plan = acc.subscription?.planName || 'Free Plan';
+    const isPro = plan.toLowerCase().includes('pro');
 
     return `
-      <div class="account-row ${acc.isActive ? 'active' : ''}" id="account-row-${acc.id}">
-        <div class="account-avatar" style="background: ${bg}">${initial}</div>
-        <div class="account-info">
-          <div class="account-name">
-            ${acc.label}
-            ${acc.isActive ? '<span class="tag active">活动中</span>' : ''}
-            ${acc.isGuest ? '<span class="tag guest">访客</span>' : ''}
-            ${oauthBadge}
-            ${profileBadge}
+      <div class="account-card ${acc.isActive ? 'active' : ''} ${acc.disabled ? 'disabled' : ''}">
+        <div class="account-card-header">
+          <div class="account-card-top">
+            <div class="account-card-avatar" style="background: ${bg}">${initial}</div>
+            <div class="account-card-info">
+              <div class="account-card-name">
+                ${acc.label}
+                <div class="account-card-badges">
+                  ${acc.isActive ? '<span class="badge-compact active">Active</span>' : ''}
+                  <span class="badge-compact ${isPro ? 'pro' : 'free'}">${plan}</span>
+                </div>
+              </div>
+              <div class="account-card-id">#${acc.id.substring(0, 8)}</div>
+            </div>
           </div>
-          <div class="account-meta">
-            <span class="account-meta-item"><span class="material-icons-round">fingerprint</span>${acc.id}</span>
-            ${acc.email ? `<span class="account-meta-item"><span class="material-icons-round">email</span>${acc.email}</span>` : ''}
-            ${connectors}
+          <div style="display:flex; gap:4px;">
+            <button class="btn btn-icon btn-sm" onclick="toggleAccountDisabled('${acc.id}')" title="${acc.disabled ? '启用账号' : '禁用账号'}">
+              <span class="material-icons-round" style="color: ${acc.disabled ? 'var(--success)' : 'var(--warning)'}; font-size:18px;">${acc.disabled ? 'play_circle' : 'pause_circle'}</span>
+            </button>
+            <button class="btn btn-icon btn-sm" onclick="deleteAccount('${acc.id}')" title="彻底删除">
+              <span class="material-icons-round" style="color: var(--error); font-size:18px;">delete_forever</span>
+            </button>
           </div>
         </div>
-        <div class="account-stats-inline">
-          <div class="inline-stat"><div class="inline-stat-value">${acc.stats.conversations}</div><div class="inline-stat-label">对话</div></div>
-          <div class="inline-stat"><div class="inline-stat-value">${acc.stats.agents}</div><div class="inline-stat-label">代理</div></div>
-          <div class="inline-stat"><div class="inline-stat-value">${acc.stats.tasks}</div><div class="inline-stat-label">任务</div></div>
+
+        <div class="account-card-details">
+          <div class="detail-item">
+            <div class="detail-label">可用量</div>
+            <div class="detail-value">${(quota.total - quota.used).toLocaleString()} <span style="font-size:10px; opacity:0.5;">${quota.unit || '积分'}</span></div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">区域</div>
+            <div class="detail-value">${acc.userType === 'cnfm' ? 'China' : 'Intl'}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">对话数</div>
+            <div class="detail-value">${acc.stats.conversations}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">最后同步</div>
+            <div class="detail-value">${quota.checkedAt ? formatDateTime(quota.checkedAt) : 'Never'}</div>
+          </div>
         </div>
-        <div class="account-actions">
-          <button class="btn btn-sm btn-ghost" onclick="handleUserInfoRefresh('${acc.id}', this)" ${userInfoReady ? '' : 'title="需要先导入 OAuth 回调凭证"'} ${userInfoReady ? '' : 'disabled'}>
-            <span class="material-icons-round">sync</span>同步用户信息
+
+        <div class="account-card-actions">
+          <button class="btn btn-outline btn-sm" onclick="openEditModal('${acc.id}')">
+            <span class="material-icons-round" style="font-size:16px;">edit</span> 编辑
           </button>
-          <button class="btn btn-sm btn-ghost" onclick="openEditModal('${acc.id}')">
-            <span class="material-icons-round">edit</span>编辑
-          </button>
-          ${acc.isActive
-            ? `<button class="btn btn-sm btn-ghost" onclick="handleSaveProfile('${acc.id}')">
-                <span class="material-icons-round">save</span>保存配置
-              </button>`
-            : `<button class="btn btn-sm btn-primary" onclick="handleSwitch('${acc.id}')" ${switchStrategy === 'none' ? 'title="需要先导入 OAuth 回调或保存本地配置"' : ''} ${switchStrategy === 'none' ? 'disabled' : ''}>
-                <span class="material-icons-round">${getSwitchActionIcon(acc)}</span>${getSwitchActionLabel(acc)}
-              </button>`
-          }
+          ${acc.isActive ? `
+            <button class="btn btn-ghost btn-sm" onclick="handleSaveProfile('${acc.id}')">
+              <span class="material-icons-round" style="font-size:16px;">save</span> 保存配置
+            </button>
+          ` : `
+            <button class="btn btn-primary btn-sm" onclick="handleSwitch('${acc.id}')" ${acc.disabled ? 'disabled' : ''}>
+              <span class="material-icons-round" style="font-size:16px;">swap_horiz</span> 切换
+            </button>
+          `}
         </div>
       </div>
     `;
@@ -648,41 +805,73 @@ function renderAccounts() {
 // ---- Render Credentials ----
 function renderCredentials() {
   const grid = document.getElementById('credentials-grid');
+  if (!grid) return;
+
   grid.innerHTML = accounts.map((acc, idx) => {
     const bg = getAvatarColor(idx);
-    const facts = getAuthFacts(acc);
-    const hasAuthData = facts.some(item => !['未保存', '未识别', '未记录'].includes(item.value));
+    const hasToken = Boolean(acc.credentials?.token);
+    const hasCookie = Boolean(acc.credentials?.cookie);
+    const hasPhoenix = Boolean(acc.credentials?.phoenixCookie);
+    const strategy = getSwitchStrategy(acc);
+    const expiryDate = acc.auth?.expiresAtIso || acc.credentials?.expiresAtIso;
+    
+    let pathLabel = '无路径';
+    let pathTone = 'danger';
+    if (strategy === 'profile') { pathLabel = '配置复写'; pathTone = 'success'; }
+    else if (strategy === 'oauth_logout') { pathLabel = 'OAuth 唤起'; pathTone = 'warning'; }
 
     return `
       <div class="credential-card">
-        <div class="credential-card-header">
-          <div class="credential-card-title">
-            <div class="quick-card-avatar" style="background: ${bg}; width: 32px; height: 32px; font-size: 13px; border-radius: 8px;">${getAvatarInitial(acc)}</div>
-            ${acc.label}
-          </div>
-          <button class="btn-icon" onclick="openCredentialModal('${acc.id}')" title="编辑原始凭证">
-            <span class="material-icons-round" style="font-size:16px">edit</span>
-          </button>
-        </div>
-        <div class="credential-card-body">
-          ${hasAuthData ? `
-            ${facts.map(item => `
-              <div class="credential-field">
-                <div class="credential-label">
-                  <span class="material-icons-round" style="font-size:14px">${item.icon}</span>${item.label}
-                </div>
-                <div class="credential-value ${item.tone ? item.tone : ''}">
-                  ${item.value}
-                  ${item.detail ? `<div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">${item.detail}</div>` : ''}
-                </div>
-              </div>
-            `).join('')}
-          ` : `
-            <div class="credential-empty">
-              <span class="material-icons-round" style="font-size:24px;display:block;margin-bottom:8px;opacity:0.4;">vpn_key</span>
-              暂无可用认证信息，请先导入 Accio 回调 URL
+        <div class="account-card-header" style="border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom:12px; margin-bottom:12px;">
+          <div class="account-card-top">
+            <div class="account-card-avatar" style="background: ${bg}; width:32px; height:32px; font-size:14px;">${getAvatarInitial(acc)}</div>
+            <div class="account-card-info">
+              <div class="account-card-name" style="font-size:14px;">${acc.label || '未命名账号'}</div>
+              <div class="account-card-id" style="font-size:10px;">UID: ${acc.id}</div>
             </div>
-          `}
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="btn btn-icon btn-sm" onclick="handleRefreshUserInfo('${acc.id}')" title="同步用户信息">
+              <span class="material-icons-round" style="font-size:16px;">sync</span>
+            </button>
+            <button class="btn btn-icon btn-sm" onclick="openCredentialModal('${acc.id}')" title="设置">
+              <span class="material-icons-round" style="font-size:16px;">settings</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="credential-item" style="margin-bottom:16px;">
+          <div class="credential-label-group">
+            <span class="detail-label">Access Token (访问令牌)</span>
+            <span class="badge-compact ${hasToken ? 'active' : 'free'}" style="font-size:9px; padding: 2px 6px;">${hasToken ? '已保存' : '缺失'}</span>
+          </div>
+          <div class="credential-code">
+            <span>${hasToken ? maskSecret(acc.credentials.token, 6) : '---'}</span>
+            <span class="material-icons-round" style="font-size:14px; opacity:0.3;">verified_user</span>
+          </div>
+        </div>
+
+        <div class="account-card-details" style="background:none; border:none; padding:0; gap:8px; margin-bottom:16px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom:16px;">
+          <div class="detail-item">
+            <div class="detail-label">切换方式</div>
+            <div class="detail-value"><span class="badge-compact ${pathTone}">${pathLabel}</span></div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">Cookie 状态</div>
+            <div class="detail-value">${hasCookie ? '有效' : (hasPhoenix ? 'Phoenix' : '缺失')}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">链接状态</div>
+            <div class="detail-value">${canRefreshQuota(acc) ? '在线 (同步中)' : '离线'}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">失效时间</div>
+            <div class="detail-value" style="font-family:'JetBrains Mono'; font-size:11px; color:${expiryDate ? 'var(--text-secondary)' : 'var(--warning)'}">
+              ${expiryDate ? formatDateTime(expiryDate) : '未记录'}
+            </div>
+          </div>
+        </div>
+
         </div>
       </div>
     `;
@@ -696,69 +885,204 @@ function renderQuota() {
     const bg = getAvatarColor(idx);
     const quota = acc.quota || {};
     const refreshReady = canRefreshQuota(acc);
-    const hasLiveQuota = Number.isFinite(quota.usagePercent) || Number.isFinite(quota.refreshCountdownSeconds);
+    const hasLivePoints = Number.isFinite(quota.total) && quota.total > 0;
+    // usagePercent from API = % already consumed (0 = nothing used, 100 = all used)
+    const hasLivePercent = Number.isFinite(quota.usagePercent);
+    const hasLiveQuota = !!quota.checkedAt;
     const refreshState = getQuotaRefreshState(quota);
-    const percent = Number.isFinite(quota.usagePercent)
-      ? Math.max(0, Math.min(100, Math.round(quota.usagePercent)))
-      : (quota.total > 0 ? Math.round((quota.used / quota.total) * 100) : 0);
-    const remainingPercent = Math.max(0, 100 - percent);
-    const level = refreshState.isReady ? 'ready' : percent < 50 ? 'low' : percent < 80 ? 'medium' : 'high';
-    const checkedAt = quota.checkedAt ? formatDateTime(quota.checkedAt) : '未记录';
+
+    // displayUsedPct: how much has been CONSUMED (0–100), drives progress bar fill
+    let displayUsedPct = 0;
+    let quotaMainLabel = '';    // left side of "X / Y 单位"
+    let quotaTotalLabel = '';
+    let quotaUnitLabel = quota.unit || '积分';
+    let remainSubLabel = '';    // e.g. "剩余 2030 积分"
+
+    if (hasLivePoints) {
+      displayUsedPct = quota.total > 0 ? Math.round((quota.used / quota.total) * 100) : 0;
+      quotaMainLabel  = quota.used.toLocaleString();
+      quotaTotalLabel = quota.total.toLocaleString();
+      const remain    = Math.max(0, quota.total - quota.used);
+      remainSubLabel  = `剩余 ${remain.toLocaleString()} ${quotaUnitLabel}`;
+    } else if (hasLivePercent) {
+      // Only have %-based data — usagePercent = % consumed
+      displayUsedPct  = Math.round(Math.max(0, Math.min(100, quota.usagePercent)));
+      quotaMainLabel  = displayUsedPct + '%';
+      quotaTotalLabel = '100%';
+      quotaUnitLabel  = '已使用';
+      remainSubLabel  = `剩余 ${100 - displayUsedPct}%`;
+    }
+
+    // Progress bar color: based on how much REMAINS (green = plenty left, red = almost gone)
+    const remainPct = 100 - displayUsedPct;
+    const level = refreshState.isReady
+      ? 'ready'
+      : (remainPct > 50 ? 'safe' : (remainPct > 20 ? 'warning' : 'danger'));
+    const checkedAt = quota.checkedAt ? formatDateTime(quota.checkedAt) : '从未刷新';
+
+    // Breakdown detail
+    const points = quota.details || {};
+    const hasBreakdown = !!(points.basic?.total || points.limited?.total || points.supplement?.total);
+
+    // Usage badge label: shows consumed%, "充足" when 0
+    const usageBadge = displayUsedPct === 0 ? '充足' : `已用 ${displayUsedPct}%`;
 
     return `
       <div class="quota-card">
         <div class="quota-card-header">
           <div class="quota-card-title">
             <div class="quick-card-avatar" style="background: ${bg}; width: 32px; height: 32px; font-size: 13px; border-radius: 8px;">${getAvatarInitial(acc)}</div>
-            ${acc.label}
+            <div>
+              <div style="font-weight: 600;">${acc.label || '未命名账号'}</div>
+              <div style="font-size: 11px; color: var(--text-tertiary); font-family: monospace;">${acc.id.substring(0, 8)}...</div>
+            </div>
           </div>
-          <button class="btn-icon" onclick="handleQuotaRefresh('${acc.id}', this)" title="${refreshReady ? '刷新配额' : '缺少远端凭证，无法刷新配额'}" ${refreshReady ? '' : 'disabled'}>
-            <span class="material-icons-round" style="font-size:16px">sync</span>
-          </button>
+          <div style="display:flex; gap:4px;">
+            <button class="btn btn-icon btn-sm" onclick="openUsageDetailsModal('${acc.id}')" title="使用详情" style="background:rgba(255,255,255,0.05);">
+              <span class="material-icons-round" style="font-size:16px; color:var(--accent);">analytics</span>
+            </button>
+            <button class="btn-icon" onclick="handleQuotaRefresh('${acc.id}', this)" title="${refreshReady ? '刷新配额' : '缺少远端凭证，无法刷新配额'}" ${refreshReady ? '' : 'disabled'}>
+              <span class="material-icons-round" style="font-size:16px">sync</span>
+            </button>
+          </div>
         </div>
+
         ${hasLiveQuota ? `
           <div class="quota-progress-container">
             <div class="quota-progress-bar">
-              <div class="quota-progress-fill ${level}" style="width: ${remainingPercent}%"></div>
+              <div class="quota-progress-fill ${level}" style="width: ${displayUsedPct}%"></div>
             </div>
           </div>
           <div class="quota-info">
-            <div>
-              <span class="quota-used">${Number.isFinite(quota.usagePercent) ? `${remainingPercent}%` : '--'}</span>
-              <span class="quota-total"> 剩余</span>
+            <div style="display:flex; flex-direction:column;">
+              <div class="quota-used">${quotaMainLabel} <small style="font-weight:400; font-size:12px; color:var(--text-tertiary);">/ ${quotaTotalLabel} ${quotaUnitLabel}</small></div>
+              ${remainSubLabel ? `<div style="font-size:11px; color:var(--text-tertiary); margin-top:2px;">${remainSubLabel}</div>` : ''}
             </div>
-            <span class="quota-percent ${level}">
-              ${refreshState.isReady ? '配额已刷新' : Number.isFinite(quota.usagePercent) ? `已使用 ${percent}%` : '已同步'}
-            </span>
+            <span class="quota-percent ${level}">${usageBadge}</span>
           </div>
-          <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);">
-            ${refreshState.isReady ? '配额已刷新，点击右上角刷新同步' : refreshState.statusLabel}
-          </div>
-          <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);">
-            来源：${quota.source || '/api/entitlement/quota'} · 最近同步：${checkedAt}
-          </div>
-        ` : quota.total > 0 ? `
-          <div class="quota-progress-container">
-            <div class="quota-progress-bar">
-              <div class="quota-progress-fill ${level}" style="width: ${percent}%"></div>
+
+          ${hasBreakdown ? `
+            <div class="quota-breakdown" style="margin-top:12px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.03); display:grid; grid-template-columns: repeat(3, 1fr); gap:8px;">
+              <div class="breakdown-item">
+                <div class="label" style="font-size:9px; color:var(--text-tertiary); margin-bottom:2px;">今日基础积分</div>
+                <div class="value" style="font-size:11px; font-weight:600;">${(points.basic?.total || 0).toLocaleString()}</div>
+                ${points.basic?.used > 0 ? `<div style="font-size:9px; color:var(--text-tertiary);">已用 ${points.basic.used}</div>` : ''}
+              </div>
+              <div class="breakdown-item">
+                <div class="label" style="font-size:9px; color:var(--text-tertiary); margin-bottom:2px;">限时积分</div>
+                <div class="value" style="font-size:11px; font-weight:600; color:var(--warning);">
+                  ${(points.limited?.used || 0).toLocaleString()} <span style="font-size:9px; opacity:0.6;">/ ${(points.limited?.total || 0).toLocaleString()}</span>
+                </div>
+              </div>
+              <div class="breakdown-item">
+                <div class="label" style="font-size:9px; color:var(--text-tertiary); margin-bottom:2px;">补充积分</div>
+                <div class="value" style="font-size:11px; font-weight:600; color:var(--accent);">${(points.supplement?.total || 0).toLocaleString()}</div>
+                ${points.supplement?.used > 0 ? `<div style="font-size:9px; color:var(--text-tertiary);">已用 ${points.supplement.used}</div>` : ''}
+              </div>
             </div>
-          </div>
-          <div class="quota-info">
-            <div>
-              <span class="quota-used">${quota.used.toLocaleString()}</span>
-              <span class="quota-total"> / ${quota.total.toLocaleString()} ${quota.unit}</span>
-            </div>
-            <span class="quota-percent ${level}">${percent}%</span>
+          ` : ''}
+
+          <div class="quota-footer">
+            <span class="material-icons-round" style="font-size:12px">${refreshReady ? 'verified' : 'history'}</span>
+            <span>${checkedAt} · ${quota.source === '/api/entitlement/quota' ? 'Accio API' : '快照同步'}</span>
           </div>
         ` : `
           <div class="credential-empty">
-            <span class="material-icons-round" style="font-size:24px;display:block;margin-bottom:8px;opacity:0.4;">data_usage</span>
-            ${refreshReady ? '暂未同步到实时配额，点击刷新重试' : '缺少远端凭证，暂时无法刷新配额'}
+            <span class="material-icons-round" style="font-size:24px;display:flex;margin-bottom:8px;opacity:0.4;">cloud_off</span>
+            ${refreshReady ? '暂未拉取到配额数据，点击右上角刷新' : '凭证失效，无法查看配额'}
           </div>
         `}
       </div>
     `;
   }).join('');
+}
+
+
+async function openUsageDetailsModal(id) {
+  const acc = accounts.find(a => a.id === id);
+  if (!acc) return;
+  
+  openModal(`使用详情: ${acc.label || acc.id}`);
+  document.getElementById('modal-body').innerHTML = `
+    <div style="display:flex; align-items:center; justify-content:center; padding: 40px;">
+      <div class="loading-spinner"></div>
+    </div>
+  `;
+
+  try {
+    const res = await fetch(`${API}/api/accounts/${id}/records`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+
+    const records = data.records || [];
+    const points = acc.quota?.details || {};
+
+    const rows = records.map(r => `
+      <tr>
+        <td style="padding:12px; border-bottom:1px solid rgba(255,255,255,0.03); font-size:12px;">${formatDateTime(r.createdAt)}</td>
+        <td style="padding:12px; border-bottom:1px solid rgba(255,255,255,0.03); font-size:12px; font-weight:600;">${r.actionName || '使用 Accio'}</td>
+        <td style="padding:12px; border-bottom:1px solid rgba(255,255,255,0.03); font-size:12px; color:var(--error); text-align:right;">-${r.pointsUsed || 1} 积分</td>
+      </tr>
+    `).join('');
+
+    document.getElementById('modal-body').innerHTML = `
+      <div style="display:grid; grid-template-columns: 1fr 1.5fr; gap:20px; margin-bottom:24px;">
+        <div style="background:rgba(255,255,255,0.03); padding:20px; border-radius:12px;">
+          <div style="font-size:14px; color:var(--text-tertiary); margin-bottom:12px;">本月概览</div>
+          <div style="font-size:32px; font-weight:700; margin-bottom:20px;">${acc.quota?.used || 0} <span style="font-size:16px; font-weight:400; color:var(--text-tertiary);">/ ${acc.quota?.total || 0} 积分</span></div>
+          
+          <div style="display:flex; flex-direction:column; gap:12px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px;">
+              <span style="color:var(--text-tertiary);">基础积分</span>
+              <span>${points.basic?.total || 0}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:12px;">
+              <span style="color:var(--text-tertiary);">限时积分</span>
+              <span style="color:var(--warning);">${points.limited?.total || 0}</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:12px;">
+              <span style="color:var(--text-tertiary);">补充积分</span>
+              <span style="color:var(--accent);">${points.supplement?.total || 0}</span>
+            </div>
+          </div>
+        </div>
+        
+        <div style="background:rgba(255,255,255,0.03); padding:20px; border-radius:12px; display:flex; flex-direction:column; justify-content:center; align-items:center;">
+          <div style="font-size:14px; color:var(--text-tertiary); margin-bottom:20px; width:100%;">近 7 次记录消耗趋势</div>
+          <div style="height:120px; width:100%; display:flex; align-items:flex-end; gap:8px;">
+            ${records.slice(0, 7).reverse().map(r => {
+              const h = Math.min(100, (r.pointsUsed || 1) * 10);
+              return `<div style="flex:1; height:${h}%; background:var(--accent); border-radius:4px 4px 0 0; opacity:0.6;"></div>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div style="font-size:16px; font-weight:600; margin-bottom:12px;">最近用量记录</div>
+      <div style="background:rgba(255,255,255,0.02); border-radius:12px; overflow:hidden;">
+        <table style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr style="background:rgba(255,255,255,0.03); text-align:left;">
+              <th style="padding:12px; font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">时间</th>
+              <th style="padding:12px; font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">操作项目</th>
+              <th style="padding:12px; font-size:11px; color:var(--text-tertiary); text-transform:uppercase; text-align:right;">消耗</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="3" style="padding:40px; text-align:center; color:var(--text-tertiary);">暂无用量数据</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    document.getElementById('modal').classList.add('modal-wide');
+  } catch (e) {
+    document.getElementById('modal-body').innerHTML = `
+      <div style="padding:40px; text-align:center; color:var(--error);">
+        加载失败: ${e.message}
+      </div>
+    `;
+  }
 }
 
 function updateAccountQuota(accountId, quota) {
@@ -902,7 +1226,7 @@ function openModal(title) {
   const saveBtn = document.getElementById('modal-save');
 
   document.getElementById('modal-title').textContent = title;
-  modal.classList.remove('modal-compact');
+  modal.className = 'modal'; // Reset classes
   footer.style.display = 'flex';
   cancelBtn.style.display = 'inline-flex';
   cancelBtn.textContent = '取消';
@@ -910,12 +1234,74 @@ function openModal(title) {
   saveBtn.textContent = '保存';
   saveBtn.onclick = null;
   document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('modal-overlay').onclick = (e) => {
+    if (e.target.id === 'modal-overlay') closeModal();
+  };
 }
 
 function closeModal() {
-  document.getElementById('modal').classList.remove('modal-compact');
+  document.getElementById('modal').className = 'modal';
   document.getElementById('modal-save').onclick = null;
   document.getElementById('modal-overlay').classList.remove('open');
+}
+
+/**
+ * Custom modern confirmation modal
+ */
+function showConfirm(title, message, options = {}) {
+  const { 
+    confirmText = '确定', 
+    cancelText = '取消', 
+    type = 'warning', // warning, error, info
+    danger = false 
+  } = options;
+
+  return new Promise((resolve) => {
+    openModal(title);
+    const modal = document.getElementById('modal');
+    modal.classList.add('modal-confirm');
+    
+    const body = document.getElementById('modal-body');
+    const saveBtn = document.getElementById('modal-save');
+    const cancelBtn = document.getElementById('modal-cancel');
+    
+    const icon = type === 'error' ? 'report_gmailerrorred' : (type === 'warning' ? 'warning_amber' : 'info');
+    const iconColor = type === 'error' ? 'var(--error)' : (type === 'warning' ? 'var(--warning)' : 'var(--accent)');
+
+    body.innerHTML = `
+      <div style="display:flex; flex-direction:column; align-items:center; text-align:center; padding: 12px 10px;">
+        <span class="material-icons-round" style="font-size:48px; color:${iconColor}; margin-bottom:16px;">${icon}</span>
+        <div style="font-size:15px; font-weight:500; line-height:1.6; color:var(--text-primary);">${message.replace(/\n/g, '<br>')}</div>
+      </div>
+    `;
+    
+    saveBtn.textContent = confirmText;
+    if (danger) {
+      saveBtn.style.background = 'var(--error)';
+      saveBtn.style.color = '#fff';
+    } else {
+      saveBtn.style.background = 'var(--accent)';
+    }
+
+    saveBtn.onclick = () => {
+      closeModal();
+      resolve(true);
+    };
+    
+    cancelBtn.textContent = cancelText;
+    cancelBtn.onclick = () => {
+      closeModal();
+      resolve(false);
+    };
+    
+    // Clicking overlay also resolves false for pure confirmation
+    document.getElementById('modal-overlay').onclick = (e) => {
+      if (e.target.id === 'modal-overlay') {
+        closeModal();
+        resolve(false);
+      }
+    };
+  });
 }
 
 function openEditModal(accountId) {
@@ -969,42 +1355,78 @@ function openCredentialModal(accountId) {
   if (!acc) return;
   const creds = acc.credentials || {};
   const switchPreference = getConfiguredSwitchMode(acc);
-  openModal(`凭证: ${acc.label}`);
+  const expiryDate = acc.auth?.expiresAtIso || acc.credentials?.expiresAtIso;
+
+  openModal(`管理凭证: ${acc.label || acc.id}`);
 
   document.getElementById('modal-body').innerHTML = `
+    <div style="background: rgba(255,255,255,0.03); padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 12px; border-left: 3px solid var(--accent);">
+      此处信息用于账号切换及配额同步。建议通过 <b>OAuth 唤起链接</b> 自动导入，而非手动维护。
+    </div>
+
     <div class="form-group">
-      <label class="form-label">切换方式</label>
+      <label class="form-label">切换偏好方式</label>
       <select class="form-input" id="cred-switch-preference">
-        <option value="oauth_logout" ${switchPreference === 'oauth_logout' ? 'selected' : ''}>退出登录 + OAuth 唤起</option>
-        <option value="profile" ${switchPreference === 'profile' ? 'selected' : ''}>恢复本地配置</option>
+        <option value="oauth_logout" ${switchPreference === 'oauth_logout' ? 'selected' : ''}>退出登录 + OAuth 唤起 (更稳健)</option>
+        <option value="profile" ${switchPreference === 'profile' ? 'selected' : ''}>快速配置复写 (更快速)</option>
       </select>
-      <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);">
-        实际切换时若所选方式当前不可用，会自动降级到另一条已就绪链路。
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">访问令牌 (Access Token)</label>
+      <textarea class="form-textarea" id="cred-token" placeholder="通常由 OAuth 导入时自动填充..." style="height: 60px;">${creds.token || ''}</textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">刷新令牌 (Refresh Token)</label>
+      <input class="form-input" id="cred-refresh-token" value="${creds.refreshToken || ''}" placeholder="用于自动刷新访问令牌">
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Accio 会话 Cookie</label>
+      <textarea class="form-textarea" id="cred-cookie" placeholder="包含登录态的原始 Cookie..." style="height: 80px;">${creds.cookie || ''}</textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">失效时间</label>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <input class="form-input" id="cred-expires-iso" value="${creds.expiresAtIso || ''}" placeholder="YYYY-MM-DDTHH:mm:ssZ" style="flex:1;">
+        <div style="font-size:11px; color:var(--text-tertiary); min-width: 140px;">
+          预览: ${expiryDate ? formatDateTime(expiryDate) : '未记录'}
+        </div>
       </div>
     </div>
-    <div class="form-group">
-      <label class="form-label">用户名 / 账号</label>
-      <input class="form-input" id="cred-username" value="${creds.username || ''}" placeholder="username">
+
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">用户名</label>
+        <input class="form-input" id="cred-username" value="${creds.username || ''}" placeholder="账号/手机/邮箱">
+      </div>
+      <div class="form-group">
+        <label class="form-label">密码</label>
+        <input class="form-input" id="cred-password" type="password" value="${creds.password || ''}" placeholder="••••••••">
+      </div>
     </div>
+
     <div class="form-group">
-      <label class="form-label">密码</label>
-      <input class="form-input" id="cred-password" type="password" value="${creds.password || ''}" placeholder="••••••••">
+      <label class="form-label">Phoenix Cookie (选填)</label>
+      <input class="form-input" id="cred-phoenix" value="${creds.phoenixCookie || ''}" placeholder="某些特定环境可能需要">
     </div>
-    <div class="form-group">
-      <label class="form-label">Token / Session</label>
-      <input class="form-input" id="cred-token" value="${creds.token || ''}" placeholder="token...">
+    
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">API Key</label>
+        <input class="form-input" id="cred-apikey" value="${creds.apiKey || ''}" placeholder="sk-...">
+      </div>
+      <div class="form-group">
+        <label class="form-label">邀请码</label>
+        <input class="form-input" id="cred-invite" value="${creds.inviteCode || ''}" placeholder="邀请码">
+      </div>
     </div>
+
     <div class="form-group">
-      <label class="form-label">API Key</label>
-      <input class="form-input" id="cred-apikey" value="${creds.apiKey || ''}" placeholder="sk-...">
-    </div>
-    <div class="form-group">
-      <label class="form-label">邀请码</label>
-      <input class="form-input" id="cred-invite" value="${creds.inviteCode || ''}" placeholder="invite code">
-    </div>
-    <div class="form-group">
-      <label class="form-label">其他凭证备注</label>
-      <textarea class="form-textarea" id="cred-notes" placeholder="其他凭证信息...">${creds.notes || ''}</textarea>
+      <label class="form-label">保存后的备注</label>
+      <textarea class="form-textarea" id="cred-notes" placeholder="其他信息..." style="height: 50px;">${creds.notes || ''}</textarea>
     </div>
   `;
 
@@ -1012,13 +1434,24 @@ function openCredentialModal(accountId) {
   saveBtn.onclick = async () => {
     const credentials = {
       ...creds,
-      username: document.getElementById('cred-username').value,
-      password: document.getElementById('cred-password').value,
-      token: document.getElementById('cred-token').value,
-      apiKey: document.getElementById('cred-apikey').value,
-      inviteCode: document.getElementById('cred-invite').value,
-      notes: document.getElementById('cred-notes').value,
+      username: document.getElementById('cred-username').value.trim(),
+      password: document.getElementById('cred-password').value.trim(),
+      token: document.getElementById('cred-token').value.trim(),
+      refreshToken: document.getElementById('cred-refresh-token').value.trim(),
+      cookie: document.getElementById('cred-cookie').value.trim(),
+      phoenixCookie: document.getElementById('cred-phoenix').value.trim(),
+      expiresAtIso: document.getElementById('cred-expires-iso').value.trim(),
+      apiKey: document.getElementById('cred-apikey').value.trim(),
+      inviteCode: document.getElementById('cred-invite').value.trim(),
+      notes: document.getElementById('cred-notes').value.trim(),
     };
+    // Also sync the numeric expiresAt if provided a valid ISO date
+    if (credentials.expiresAtIso) {
+      try {
+        const d = new Date(credentials.expiresAtIso);
+        if (!isNaN(d.getTime())) credentials.expiresAt = Math.floor(d.getTime() / 1000);
+      } catch {}
+    }
     await updateAccount(accountId, {
       credentials,
       switchPreference: document.getElementById('cred-switch-preference').value,
@@ -1157,47 +1590,74 @@ function startPolling() {
 }
 
 function openImportModal() {
-  openModal('📥 导入自动授权链接');
-  document.getElementById('modal-body').innerHTML = `
-    <div style="margin-bottom: 16px; font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
-      请粘贴从浏览器拦截到的 Accio 登录回调链接 (http://127.0.0.1:4097/auth/callback...)。<br><br>
-      <span style="color:var(--success)">✨ 功能说明：</span><br>
-      Manager 会自动提取 Token 凭证以及真名，并自动向 Accio 客户端注入该登录状态。如果 Token 有效，系统还将为您自动查出最新余额并登记！
+  openModal('📥 迁移旧版授权数据');
+  const body = document.getElementById('modal-body');
+  body.innerHTML = `
+    <div style="margin-bottom: 20px; font-size: 13px; color: var(--text-secondary); line-height: 1.6; padding:12px; background:rgba(255,255,255,0.03); border-radius:8px;">
+      <span style="color:var(--accent); font-weight:600;">✨ 自动迁移说明：</span><br>
+      选择包含旧版 Manager 数据或官方 Accio 账号数据的文件夹。系统将自动批量导入所有的：<br>
+      • <b>Token 登录凭证</b> (来自 accounts_meta.json)<br>
+      • <b>物理 Profile 缓存</b> (来自 profiles/ 或 .accio/accounts/)
     </div>
+    
     <div class="form-group">
-      <label class="form-label">登录回调 URL</label>
-      <textarea class="form-textarea" id="import-url" placeholder="http://127.0.0.1:4097/auth/callback?accessToken=..." style="min-height: 120px; word-break: break-all; font-family: monospace;"></textarea>
+      <label class="form-label">选择源文件夹</label>
+      <div style="display:flex; gap:12px;">
+        <input type="text" class="form-input" id="import-folder-path" readonly placeholder="点击右侧按钮选择文件夹..." style="flex:1;">
+        <button class="btn btn-ghost" id="browse-folder-btn" style="padding:0 16px;">
+          <span class="material-icons-round">folder_open</span>
+        </button>
+      </div>
+    </div>
+    <div id="import-progress" style="margin-top:16px; display:none; text-align:center;">
+       <div class="spinner" style="margin:0 auto 10px;"></div>
+       <div style="color:var(--text-secondary); font-size:12px;">正在迁移大容量数据，请稍候...</div>
     </div>
   `;
 
+  const browseBtn = document.getElementById('browse-folder-btn');
+  const pathInput = document.getElementById('import-folder-path');
   const saveBtn = document.getElementById('modal-save');
+  saveBtn.textContent = '开始迁移';
+
+  browseBtn.onclick = async () => {
+    if (window.electronAPI && window.electronAPI.selectDirectory) {
+      const path = await window.electronAPI.selectDirectory();
+      if (path) pathInput.value = path;
+    } else {
+      showToast('该功能仅限桌面客户端使用', 'warning');
+    }
+  };
+
   saveBtn.onclick = async () => {
-    const url = document.getElementById('import-url').value.trim();
-    if (!url) return showToast('请输入有效的包含 accessToken 的 URL', 'warning');
+    const directoryPath = pathInput.value.trim();
+    if (!directoryPath) return showToast('请先选择有效的源文件夹', 'warning');
 
     saveBtn.disabled = true;
-    saveBtn.innerHTML = '<span class="material-icons-round" style="animation: spin 1s linear infinite;">sync</span> 处理中...';
+    saveBtn.innerHTML = '<span class="material-icons-round spin">sync</span> 迁移中...';
+    document.getElementById('import-progress').style.display = 'block';
 
     try {
-      const res = await fetch(`${API}/api/auth/import`, {
+      const res = await fetch(`${API}/api/auth/import-from-folder`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({ directoryPath })
       });
       const data = await res.json();
       
       if (res.ok && data.success) {
-        showToast(`授权成功！用户：${data.name}`, 'success');
+        showToast(`迁移完成！成功导入 ${data.count} 个账号`, 'success');
         closeModal();
         await loadAll();
       } else {
-        showToast(`导入失败: ${data.error || '解析错误'}`, 'error');
+        showToast(`迁移失败: ${data.error || '未找到有效数据'}`, 'error');
       }
     } catch (e) {
-      showToast(`网络错误: ${e.message}`, 'error');
+      showToast(`网络或系统错误: ${e.message}`, 'error');
     } finally {
       saveBtn.disabled = false;
-      saveBtn.textContent = '保存';
+      saveBtn.textContent = '开始迁移';
+      document.getElementById('import-progress').style.display = 'none';
     }
   };
 }
@@ -1226,7 +1686,7 @@ function setupModal() {
 }
 
 // ---- Load all data ----
-async function loadAll() {
+async function loadAll(retries = 0) {
   try {
     await Promise.all([fetchAccounts(), fetchOverview()]);
     renderDashboard();
@@ -1235,6 +1695,12 @@ async function loadAll() {
     renderQuota();
     updateActiveBadge();
   } catch (e) {
+    // On initial load, retry a few times to let the local Express server start up
+    if (retries < 10 && (e instanceof TypeError || e.message.includes('fetch'))) {
+      console.warn(`[loadAll] Server not ready, retrying in 500ms (attempt ${retries + 1}/10)...`);
+      await new Promise(res => setTimeout(res, 500));
+      return loadAll(retries + 1);
+    }
     showToast('加载失败: ' + e.message, 'error');
     console.error(e);
   }
@@ -1243,6 +1709,35 @@ async function loadAll() {
 // ---- Accio Auth ----
 async function setupAccioAuth() {
   const linkEl = document.getElementById('accio-auth-link');
+  // ... (previous setup code)
+  
+  // Add Security & Automated Capture Tips below the UI
+  const container = document.getElementById('accio-auth-container');
+  if (container && !document.getElementById('accio-auth-tips')) {
+    const tipsBox = document.createElement('div');
+    tipsBox.id = 'accio-auth-tips';
+    tipsBox.style.marginTop = '24px';
+    tipsBox.style.padding = '16px';
+    tipsBox.style.borderRadius = '12px';
+    tipsBox.style.background = 'rgba(108, 99, 255, 0.05)';
+    tipsBox.style.border = '1px dashed rgba(108, 99, 255, 0.2)';
+    
+    tipsBox.innerHTML = `
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px; color:var(--accent);">
+        <span class="material-icons-round" style="font-size:20px;">security</span>
+        <span style="font-size:14px; font-weight:600;">认证安全与自动化提示</span>
+      </div>
+      <ul style="margin:0; padding-left:20px; font-size:13px; color:var(--text-secondary); line-height:1.8;">
+        <li><b style="color:var(--text-primary);">自动抓取</b>：点击“唤起授权”后，Manager 将在登录成功的瞬间自动捕获 Token 并保存，你无需手动操作。</li>
+        <li><b style="color:var(--text-primary);">指纹随机</b>：已启用 <b>Anti-Detect</b>。每次弹出窗口均使用随机的浏览器环境（User-Agent）和独立的 Session 分区，有效规避风控。</li>
+        <li><b style="color:var(--text-primary);">物理隔离</b>：不同账号的登录会话完全隔离，不会出现 Cookie 覆盖或账号关联问题。</li>
+        <li><b style="color:var(--text-primary);">风险建议</b>：为保证账号安全，建议在批量导入时每 5 个账号更换一次 IP 节点。</li>
+      </ul>
+    `;
+    container.appendChild(tipsBox);
+  }
+
+  // ... (rest of search/open logic)
   const copyBtn = document.getElementById('copy-auth-link');
   const openBtn = document.getElementById('open-auth-link');
   const submitBtn = document.getElementById('submit-callback-url');
@@ -1305,14 +1800,57 @@ async function setupAccioAuth() {
   }
 }
 
+function setupDesktopControls() {
+  if (window.electronAPI) {
+    document.getElementById('win-min').addEventListener('click', () => {
+      window.electronAPI.minimize();
+    });
+    document.getElementById('win-max').addEventListener('click', () => {
+      window.electronAPI.maximize();
+    });
+    document.getElementById('win-close').addEventListener('click', () => {
+      window.electronAPI.close();
+    });
+  }
+}
+
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', () => {
   setupNav();
   setupModal();
   setupAccioAuth();
+  setupDesktopControls();
   syncRouteWithPage(getPageFromLocation());
   switchPage(getPageFromLocation());
   loadAll().then(() => {
     startPolling();
   });
+
+  // Desktop OAuth Auto-Persistence Listener
+  if (window.electronAPI && typeof window.electronAPI.onOAuthSuccess === 'function') {
+    window.electronAPI.onOAuthSuccess(async (data) => {
+      console.log('[Desktop] OAuth Success triggered via IPC:', data.url);
+      showToast('自动抓取到认证跳转，正在同步账号...', 'info');
+      await loadAll();
+    });
+  }
+
+  // Automatic Update Check on Startup
+  setTimeout(async () => {
+    try {
+      const res = await fetch(`${API}/api/updates/check`);
+      const data = await res.json();
+      if (data.updateAvailable) {
+        const platformLabel = data.platform === 'darwin' ? 'macOS' : 'Windows';
+        const confirmed = await showConfirm(`发现新版本 (${platformLabel})`, 
+          `检测到最新版本 <b>v${data.latest}</b> (当前 v${data.current})。<br>建议立即前往下载最新版，体验更稳定的多账号管理。`, {
+          confirmText: '前往下载',
+          type: 'info'
+        });
+        if (confirmed) window.open(data.releaseUrl, '_blank');
+      }
+    } catch (e) {
+      console.warn('[Update] Check failed:', e.message);
+    }
+  }, 5000); // Check after 5s to prioritize main data load
 });

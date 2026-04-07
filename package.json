@@ -3,13 +3,52 @@
   "version": "1.0.0",
   "description": "Accio Multi-Account Manager - Manage, switch and track your Accio accounts",
   "license": "MIT",
-  "main": "server.js",
+  "main": "main.js",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "electron:dev": "electron .",
+    "electron:build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:all": "electron-builder -mw"
   },
   "dependencies": {
     "express": "^4.21.0",
-    "jsonc-parser": "^3.3.1"
+    "jsonc-parser": "^3.3.1",
+    "fs-extra": "^11.3.4"
+  },
+  "devDependencies": {
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.accio.manager",
+    "productName": "Accio Manager",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "icon.png",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "shortcutName": "Accio Manager"
+    }
   }
 }

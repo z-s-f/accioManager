@@ -7,18 +7,24 @@ const crypto = require('crypto');
 const net = require('net');
 
 const app = express();
-const PORT = 3456;
+const PORT = process.env.PORT || 3456;
 
 const HOME_DIR = require('os').homedir();
 const ACCIO_DIR = path.join(HOME_DIR, '.accio');
 const ACCOUNTS_DIR = path.join(ACCIO_DIR, 'accounts');
-const ELECTRON_DIR = path.join(HOME_DIR, 'Library', 'Application Support', 'Accio');
-const META_FILE = path.join(__dirname, 'data', 'accounts_meta.json');
-const PROFILES_DIR = path.join(__dirname, 'data', 'profiles');
+const ELECTRON_DIR = process.platform === 'darwin'
+  ? path.join(HOME_DIR, 'Library', 'Application Support', 'Accio')
+  : (process.env.APPDATA ? path.join(process.env.APPDATA, 'Accio') : path.join(HOME_DIR, 'AppData', 'Roaming', 'Accio'));
+
+// Support custom data directory for packaged Electron apps
+const DATA_ROOT = process.env.ACCIO_MANAGER_DATA_DIR || path.join(__dirname, 'data');
+const META_FILE = path.join(DATA_ROOT, 'accounts_meta.json');
+const PROFILES_DIR = path.join(DATA_ROOT, 'profiles');
 const SDK_LOG = path.join(ACCIO_DIR, 'logs', 'sdk.log');
 const UTDID_FILE = path.join(ACCIO_DIR, 'utdid');
-const ACCIO_AUTH_CALLBACK = 'http://127.0.0.1:4097/auth/callback';
-const ACCIO_LOGIN_URL = 'https://www.accio.com/login';
+const REGISTER_OAUTH_BRIDGE_FILE = path.join(DATA_ROOT, 'register', 'oauth_bridge_queue.json');
+const ACCIO_AUTH_CALLBACK = 'http://127.0.0.1:3456/auth/callback';
+const ACCIO_LOGIN_URL = 'https://www.accio.com/login?language=en_US';
 const ACCIO_GATEWAY_ORIGIN = 'https://phoenix-gw.alibaba.com';
 const ACCIO_MTOP_ORIGIN = 'https://acs.h.accio.com';
 const ACCIO_APP_VERSION = '0.5.0';
@@ -33,7 +39,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ========== Helpers ==========
 
 function ensureDataDir() {
-  const dataDir = path.join(__dirname, 'data');
+  const dataDir = DATA_ROOT;
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   if (!fs.existsSync(PROFILES_DIR)) fs.mkdirSync(PROFILES_DIR, { recursive: true });
   if (!fs.existsSync(META_FILE)) {
@@ -51,11 +57,48 @@ function writeMeta(data) {
   fs.writeFileSync(META_FILE, JSON.stringify(data, null, 2));
 }
 
+function readRegisterOAuthBridgeQueue() {
+  try {
+    if (!fs.existsSync(REGISTER_OAUTH_BRIDGE_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(REGISTER_OAUTH_BRIDGE_FILE, 'utf-8'));
+    return Array.isArray(raw) ? raw.filter(item => item && typeof item === 'object') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRegisterOAuthBridgeQueue(entries) {
+  fs.mkdirSync(path.dirname(REGISTER_OAUTH_BRIDGE_FILE), { recursive: true });
+  fs.writeFileSync(REGISTER_OAUTH_BRIDGE_FILE, JSON.stringify(entries, null, 2));
+}
+
+function consumeRegisterOAuthBridgeEntry({ email = '' } = {}) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  const entries = readRegisterOAuthBridgeQueue();
+  const matchIndex = entries.findIndex(item =>
+    String(item.email || '').trim().toLowerCase() === normalizedEmail
+  );
+
+  if (matchIndex === -1) return null;
+
+  const [matched] = entries.splice(matchIndex, 1);
+  writeRegisterOAuthBridgeQueue(entries);
+  return matched;
+}
+
 function readSettings() {
   try {
     const raw = fs.readFileSync(path.join(ACCIO_DIR, 'settings.jsonc'), 'utf-8');
     return parseJsonc(raw);
   } catch { return {}; }
+}
+
+function getFetchTimeoutSignal(timeoutMs) {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
 }
 
 function safeDecode(value) {
@@ -284,9 +327,63 @@ async function fetchAccioAccountInfo(accountMeta = {}) {
   }
 }
 
+// Parse a single point component — handles both new API (totalPoint/usedPoint) and old API (total/used)
+function parsePointComponent(comp) {
+  if (!comp || typeof comp !== 'object') return { total: 0, used: 0 };
+  const total = Number(comp.totalPoint ?? comp.total ?? comp.totalPoints ?? comp.quota ?? 0) || 0;
+  const used  = Number(comp.usedPoint  ?? comp.used  ?? comp.usedPoints  ?? comp.consume ?? 0) || 0;
+  return { total, used };
+}
+
+// Classify a point component by type name
+function classifyPointComponent(comp) {
+  const raw = String(
+    comp.pointType || comp.type || comp.name || comp.pointName || comp.category || ''
+  ).toLowerCase();
+  if (raw.includes('basic') || raw.includes('daily') || raw.includes('today') || raw.includes('base')) return 'basic';
+  if (raw.includes('limit') || raw.includes('timed') || raw.includes('temp')) return 'limited';
+  if (raw.includes('supplement') || raw.includes('gift') || raw.includes('extra') || raw.includes('bonus')) return 'supplement';
+  return 'other';
+}
+
+async function fetchAccioPoints(credentials = {}) {
+  const gatewayContext = getAccioGatewayContext(credentials);
+  const pointUrl = new URL('/api/entitlement/point', ACCIO_GATEWAY_ORIGIN);
+  pointUrl.searchParams.set('accessToken', credentials.token);
+  pointUrl.searchParams.set('utdid', gatewayContext.utdid);
+  pointUrl.searchParams.set('version', gatewayContext.version);
+
+  try {
+    const fetchRes = await fetch(pointUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'x-language': gatewayContext.language,
+        'x-utdid': gatewayContext.utdid,
+        'x-app-version': gatewayContext.version,
+        'x-os': gatewayContext.os,
+        'x-cna': gatewayContext.cna,
+        ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
+      },
+      signal: getFetchTimeoutSignal(5000),
+    });
+
+    if (!fetchRes.ok) return null;
+    const payload = await fetchRes.json();
+    console.log('[Points] Raw /api/entitlement/point response:', JSON.stringify(payload?.data));
+    return (payload && payload.success) ? payload.data : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchAccioQuota(credentials = {}) {
   if (typeof fetch === 'undefined' || !credentials.token) return null;
   const gatewayContext = getAccioGatewayContext(credentials);
+  
+  // Try to fetch detailed points first as it has more breakdown
+  const pointData = await fetchAccioPoints(credentials);
+  
   const quotaUrl = new URL('/api/entitlement/quota', ACCIO_GATEWAY_ORIGIN);
   quotaUrl.searchParams.set('accessToken', credentials.token);
   quotaUrl.searchParams.set('utdid', gatewayContext.utdid);
@@ -307,26 +404,111 @@ async function fetchAccioQuota(credentials = {}) {
       signal: getFetchTimeoutSignal(5000),
     });
 
-    if (!fetchRes.ok) return null;
-    const payload = await fetchRes.json();
-    if (!payload || !payload.success || !payload.data) return null;
+    if (!fetchRes.ok && !pointData) return null;
+    const payload = fetchRes.ok ? await fetchRes.json() : { success: true, data: {} };
+    if (!payload || !payload.success) {
+      if (!pointData) return null;
+    }
 
-    const usagePercent = Number(payload.data.usagePercent);
-    const refreshCountdownSeconds = Number(payload.data.refreshCountdownSeconds);
+    // Merge: point API data on top of quota API data (point data is more detailed)
+    const raw = { ...(payload.data || {}), ...(pointData || {}) };
 
-    return {
-      usagePercent: Number.isFinite(usagePercent) ? Math.max(0, Math.min(100, usagePercent)) : null,
+    console.log('[Quota] Raw merged API data:', JSON.stringify(raw));
+
+    const refreshCountdownSeconds = Number(raw.refreshCountdownSeconds ?? raw.countdown ?? raw.nextRefreshSeconds);
+
+    const result = {
+      checkedAt: new Date().toISOString(),
+      source: '/api/entitlement/quota',
       refreshCountdownSeconds: Number.isFinite(refreshCountdownSeconds)
         ? Math.max(0, Math.floor(refreshCountdownSeconds))
         : null,
-      checkedAt: new Date().toISOString(),
-      source: '/api/entitlement/quota',
+      details: {
+        basic:      { total: 0, used: 0 },
+        limited:    { total: 0, used: 0 },
+        supplement: { total: 0, used: 0 },
+      },
     };
+
+    let total = 0;
+    let used  = 0;
+    let hasBreakdown = false;
+
+    // --- Strategy 1: pointComponents array (old + new API) ---
+    const components = raw.pointComponents || raw.components || raw.pointList || raw.points || null;
+    if (Array.isArray(components) && components.length > 0) {
+      hasBreakdown = true;
+      components.forEach(comp => {
+        const { total: ct, used: cu } = parsePointComponent(comp);
+        total += ct;
+        used  += cu;
+        const kind = classifyPointComponent(comp);
+        if (kind === 'basic')           result.details.basic      = { total: ct, used: cu };
+        else if (kind === 'limited')    result.details.limited    = { total: ct, used: cu };
+        else if (kind === 'supplement') result.details.supplement = { total: ct, used: cu };
+        else {
+          // Unknown type — add to supplement bucket as a catch-all
+          result.details.supplement.total += ct;
+          result.details.supplement.used  += cu;
+        }
+      });
+    }
+    // --- Strategy 2: flat named sub-objects (including new API entitlement) ---
+    else {
+      const basicRaw      = raw.entitlement?.daily   || raw.basic      || raw.basePoint  || raw.dailyPoint || raw.todayPoint || {};
+      const limitedRaw    = raw.entitlement?.monthly || raw.limited    || raw.limitedTime || raw.timedPoint || raw.tempPoint  || {};
+      const supplementRaw = raw.entitlement?.referral|| raw.supplement || raw.gift        || raw.bonusPoint || raw.extraPoint || {};
+
+      const b = parsePointComponent(basicRaw);
+      const l = parsePointComponent(limitedRaw);
+      const s = parsePointComponent(supplementRaw);
+
+      if (b.total > 0 || l.total > 0 || s.total > 0) {
+        hasBreakdown = true;
+        result.details.basic      = b;
+        result.details.limited    = l;
+        result.details.supplement = s;
+        total = b.total + l.total + s.total;
+        used  = b.used  + l.used  + s.used;
+      }
+    }
+
+    // --- Strategy 3: top-level total/used (fallback or override) ---
+    const rawTotal = Number(raw.total ?? raw.totalPoint ?? raw.quota ?? raw.totalQuota ?? 0);
+    let rawUsed  = Number(raw.used  ?? raw.usedPoint  ?? raw.consume ?? raw.usedQuota ?? 0);
+    
+    // New Accio API uses `remaining` instead of `used`
+    if (raw.remaining !== undefined && raw.used === undefined && raw.usedPoint === undefined && raw.consume === undefined) {
+      rawUsed = Math.max(0, rawTotal - Number(raw.remaining || 0));
+    }
+    
+    // Favor top-level total/used if the API explicitly provides a global total
+    if (rawTotal > 0) {
+      total = rawTotal;
+      used  = rawUsed;
+    }
+
+    // Populate result with final totals
+    if (total > 0) {
+      result.total = total;
+      result.used  = used;
+      result.unit  = '积分';
+      result.usagePercent = total > 0 ? (used / total) * 100 : 0;
+    } else {
+      // Only a percent is available
+      const rawPct = Number(raw.usagePercent ?? raw.percent ?? raw.usedPercent);
+      if (Number.isFinite(rawPct)) {
+        result.usagePercent = Math.max(0, Math.min(100, rawPct));
+      }
+    }
+
+    return result;
   } catch (e) {
     console.warn('Could not fetch remote quota:', e.message);
     return null;
   }
 }
+
 
 function buildRuntimeAccountState(accountMeta = {}) {
   return {
@@ -347,19 +529,110 @@ async function refreshStoredQuota(accountId, meta = readMeta()) {
     throw new Error('缺少可用的 Accio 远端凭证，无法刷新配额');
   }
 
-  const liveQuota = await fetchAccioQuota(existing.credentials);
-  if (!liveQuota) {
-    throw new Error('未获取到最新配额，请确认账号凭证仍然有效');
+  const [liveQuota, liveSubscription, accountInfo] = await Promise.all([
+    fetchAccioQuota(existing.credentials),
+    fetchAccioSubscription(existing.credentials),
+    existing.credentials.cookie ? fetchAccioAccountInfo(existing) : Promise.resolve(null)
+  ]);
+
+  // Merge high-precision MTOP points into the quota result if available
+  if (liveQuota && accountInfo) {
+    if (Number.isFinite(accountInfo.remainingCredits)) {
+      // If MTOP reports a different total/used, favor MTOP or adjust logic
+      // In Accio, 'remainingCredits' is typically total - used.
+      // We keep total from Quota API but adjust used if MTOP is more 'live'
+    }
   }
 
   meta.accounts[accountId] = {
     ...existing,
     quota: { ...getDefaultQuota(), ...(existing.quota || {}), ...liveQuota },
+    subscription: liveSubscription || existing.subscription || { planName: '免费套餐' },
+    remoteProfile: { ...(existing.remoteProfile || {}), ...(accountInfo || {}) },
     updatedAt: new Date().toISOString(),
     createdAt: existing.createdAt || new Date().toISOString(),
   };
 
+  if (accountInfo?.nickName) meta.accounts[accountId].label = accountInfo.nickName;
+
   return meta.accounts[accountId].quota;
+}
+
+async function fetchAccioUsageRecords(credentials = {}) {
+  if (typeof fetch === 'undefined' || !credentials.token) return [];
+  const gatewayContext = getAccioGatewayContext(credentials);
+  const recordsUrl = new URL('/api/entitlement/usage/record', ACCIO_GATEWAY_ORIGIN);
+  recordsUrl.searchParams.set('accessToken', credentials.token);
+  recordsUrl.searchParams.set('utdid', gatewayContext.utdid);
+  recordsUrl.searchParams.set('version', gatewayContext.version);
+  recordsUrl.searchParams.set('pageSize', '20');
+
+  try {
+    const fetchRes = await fetch(recordsUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'x-language': gatewayContext.language,
+        'x-utdid': gatewayContext.utdid,
+        'x-app-version': gatewayContext.version,
+        'x-os': gatewayContext.os,
+        'x-cna': gatewayContext.cna,
+        ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
+      },
+      signal: getFetchTimeoutSignal(5000),
+    });
+
+    if (!fetchRes.ok) return [];
+    const payload = await fetchRes.json();
+    if (!payload || !payload.success || !payload.data || !Array.isArray(payload.data.list)) return [];
+
+    return payload.data.list.map(item => ({
+      createdAt: item.gmtCreate || item.createAt || item.time || new Date().toISOString(),
+      actionName: item.sceneName || item.actionName || item.scene || item.title || '使用 Accio',
+      pointsUsed: Math.abs(item.pointChange || item.cost || item.pointsUsed || 1)
+    }));
+  } catch (e) {
+    console.warn('Could not fetch usage records:', e.message);
+    return [];
+  }
+}
+
+async function fetchAccioSubscription(credentials = {}) {
+  if (typeof fetch === 'undefined' || !credentials.token) return null;
+  const gatewayContext = getAccioGatewayContext(credentials);
+  const subUrl = new URL('/api/entitlement/currentSubscription', ACCIO_GATEWAY_ORIGIN);
+  subUrl.searchParams.set('accessToken', credentials.token);
+  subUrl.searchParams.set('utdid', gatewayContext.utdid);
+  subUrl.searchParams.set('version', gatewayContext.version);
+
+  try {
+    const fetchRes = await fetch(subUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'x-language': gatewayContext.language,
+        'x-utdid': gatewayContext.utdid,
+        'x-app-version': gatewayContext.version,
+        'x-os': gatewayContext.os,
+        'x-cna': gatewayContext.cna,
+        ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
+      },
+      signal: getFetchTimeoutSignal(5000),
+    });
+
+    if (!fetchRes.ok) return null;
+    const payload = await fetchRes.json();
+    if (!payload || !payload.success || !payload.data) return null;
+
+    return {
+      planName: payload.data.planName || '未知套餐',
+      status: payload.data.status || 'active',
+      expireAt: payload.data.expireAt || null,
+    };
+  } catch (e) {
+    console.warn('Could not fetch subscription info:', e.message);
+    return null;
+  }
 }
 
 async function refreshStoredRemoteProfile(accountId, meta = readMeta()) {
@@ -500,7 +773,10 @@ async function forwardAccioAuthCallback(rawUrl) {
     throw new Error('当前运行环境不支持本地认证回调转发');
   }
 
-  const response = await fetch(rawUrl, {
+  const targetUrl = new URL(rawUrl);
+  targetUrl.port = '4097';
+
+  const response = await fetch(targetUrl.toString(), {
     method: 'GET',
     signal: getFetchTimeoutSignal(5000),
   });
@@ -518,7 +794,11 @@ async function fetchAccioLocalAuthUser() {
     throw new Error('当前运行环境不支持本地认证状态查询');
   }
 
-  const response = await fetch(`${ACCIO_AUTH_CALLBACK.replace('/callback', '/user')}`, {
+  const targetUrl = new URL(ACCIO_AUTH_CALLBACK);
+  targetUrl.port = '4097';
+  targetUrl.pathname = '/auth/user';
+
+  const response = await fetch(targetUrl.toString(), {
     method: 'GET',
     signal: getFetchTimeoutSignal(3000),
   });
@@ -532,7 +812,11 @@ async function logoutAccioLocal() {
     throw new Error('当前运行环境不支持本地登出');
   }
 
-  const response = await fetch(`${ACCIO_AUTH_CALLBACK.replace('/callback', '/logout')}`, {
+  const targetUrl = new URL(ACCIO_AUTH_CALLBACK);
+  targetUrl.port = '4097';
+  targetUrl.pathname = '/auth/logout';
+
+  const response = await fetch(targetUrl.toString(), {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -648,7 +932,14 @@ async function importAccioAuthCallback(rawUrl, { validateState = false } = {}) {
 
   let decodedCookie = cookieRaw;
   try {
-    decodedCookie = decodeURIComponent(cookieRaw);
+    // Repeatedly decode to handle double/triple-encoded cookies (e.g. %253D → %3D → =)
+    let prev = cookieRaw;
+    let current = decodeURIComponent(prev);
+    while (current !== prev) {
+      prev = current;
+      try { current = decodeURIComponent(prev); } catch { break; }
+    }
+    decodedCookie = current;
   } catch {}
 
   if (!accessToken) {
@@ -721,6 +1012,28 @@ async function importAccioAuthCallback(rawUrl, { validateState = false } = {}) {
     }
     if ((!meta.accounts[userId].label || meta.accounts[userId].label === `账号 ${userId}`) && accountInfo?.nickName) {
       meta.accounts[userId].label = accountInfo.nickName;
+    }
+  }
+
+  const bridgeMatched = consumeRegisterOAuthBridgeEntry({
+    email: meta.accounts[userId].email,
+  });
+  if (bridgeMatched) {
+    meta.accounts[userId].registration = {
+      ...(meta.accounts[userId].registration || {}),
+      source: bridgeMatched.source || 'python_register',
+      email: bridgeMatched.email || meta.accounts[userId].email || '',
+      registeredAt: bridgeMatched.registeredAt || null,
+      authProcessType: bridgeMatched.authProcessType || null,
+      sid: bridgeMatched.sid || null,
+      bridgeMatchedAt: new Date().toISOString(),
+    };
+    if (!meta.accounts[userId].credentials.deviceId && bridgeMatched.deviceId) {
+      meta.accounts[userId].credentials.deviceId = bridgeMatched.deviceId;
+    }
+    meta.accounts[userId].tags = meta.accounts[userId].tags || [];
+    if (!meta.accounts[userId].tags.includes('Registered')) {
+      meta.accounts[userId].tags.push('Registered');
     }
   }
 
@@ -922,6 +1235,8 @@ function getAccountStats(accountId) {
   const accountDir = path.join(ACCOUNTS_DIR, accountId);
   const stats = { conversations: 0, agents: 0, connectors: [], tasks: 0, skills: 0, channels: [], lastModified: null };
   try {
+    if (!fs.existsSync(accountDir)) return stats; // Don't error if directory hasn't been created yet
+    
     const convDir = path.join(accountDir, 'conversations');
     if (fs.existsSync(convDir)) stats.conversations = fs.readdirSync(convDir).filter(f => !f.startsWith('.')).length;
     const agentsDir = path.join(accountDir, 'agents');
@@ -936,7 +1251,10 @@ function getAccountStats(accountId) {
     if (fs.existsSync(channelsDir)) stats.channels = fs.readdirSync(channelsDir).filter(f => !f.startsWith('.'));
     stats.lastModified = fs.statSync(accountDir).mtime.toISOString();
   } catch (e) {
-    console.error(`Error reading stats for account ${accountId}:`, e.message);
+    // Avoid spamming error for missing directories during initial state
+    if (e.code !== 'ENOENT') {
+      console.error(`Error reading stats for account ${accountId}:`, e.message);
+    }
   }
   return stats;
 }
@@ -970,6 +1288,9 @@ app.get('/api/accounts', async (req, res) => {
         remoteProfile: accountMeta.remoteProfile || null,
         isActive: activeId === id,
         isGuest: id === 'guest',
+        disabled: !!accountMeta.disabled, // Add missing disabled state
+        subscription: accountMeta.subscription || { planName: 'Free Plan' }, // Add subscription
+        userType: accountMeta.profile?.userType || (accountMeta.userType || 'ifm'), // User type for China/Intl detection
         stats,
         defaultAgentsCreated: settingsEntry.defaultAgentsCreated || [],
         createdAt: accountMeta.createdAt || null,
@@ -1062,6 +1383,65 @@ app.put('/api/accounts/:id', (req, res) => {
     res.json({ success: true, account: meta.accounts[id] });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/accounts/:id
+app.delete('/api/accounts/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const meta = readMeta();
+    
+    // 1. Remove from metadata
+    if (meta.accounts && meta.accounts[id]) {
+      delete meta.accounts[id];
+      writeMeta(meta);
+    }
+    
+    // 2. Remove physical storage directory to prevent "auto-discovery" of ghost accounts
+    const accountDir = path.join(ACCOUNTS_DIR, id);
+    if (fs.existsSync(accountDir)) {
+      try {
+        fs.rmSync(accountDir, { recursive: true, force: true });
+      } catch (err) {
+        console.error(`Failed to cleanup directory for ${id}:`, err.message);
+      }
+    }
+    
+    res.json({ success: true, message: `账号 ${id} 及其所有本地配置已移除` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/accounts/:id/toggle-disabled
+app.post('/api/accounts/:id/toggle-disabled', (req, res) => {
+  try {
+    const meta = readMeta();
+    const acc = meta.accounts[req.params.id];
+    if (!acc) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+    acc.disabled = !acc.disabled;
+    writeMeta(meta);
+    res.json({ success: true, disabled: acc.disabled });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/accounts/:id/records
+app.get('/api/accounts/:id/records', async (req, res) => {
+  try {
+    const meta = readMeta();
+    const acc = meta.accounts[req.params.id];
+    if (!acc || !hasAccioAuthCredentials(acc.credentials)) {
+      return res.json({ success: true, records: [] });
+    }
+    const records = await fetchAccioUsageRecords(acc.credentials);
+    res.json({ success: true, records });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -1266,6 +1646,51 @@ app.post('/api/auth/import', async (req, res) => {
   }
 });
 
+// GET /api/debug/quota/:id — returns raw API responses for debugging the new points system
+app.get('/api/debug/quota/:id', async (req, res) => {
+  try {
+    const meta = readMeta();
+    const acc = meta.accounts[req.params.id];
+    if (!acc || !hasAccioAuthCredentials(acc.credentials)) {
+      return res.status(404).json({ error: '账号不存在或缺少凭证' });
+    }
+    const gatewayContext = getAccioGatewayContext(acc.credentials);
+    const headers = {
+      'Accept': 'application/json, text/plain, */*',
+      'x-language': gatewayContext.language,
+      'x-utdid': gatewayContext.utdid,
+      'x-app-version': gatewayContext.version,
+      'x-os': gatewayContext.os,
+      'x-cna': gatewayContext.cna,
+      ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
+    };
+
+    const fetchRaw = async (path) => {
+      const url = new URL(path, ACCIO_GATEWAY_ORIGIN);
+      url.searchParams.set('accessToken', acc.credentials.token);
+      url.searchParams.set('utdid', gatewayContext.utdid);
+      url.searchParams.set('version', gatewayContext.version);
+      try {
+        const r = await fetch(url, { method: 'GET', headers, signal: getFetchTimeoutSignal(5000) });
+        const text = await r.text();
+        return { status: r.status, ok: r.ok, raw: text, parsed: JSON.parse(text) };
+      } catch (e) {
+        return { error: e.message };
+      }
+    };
+
+    const [quotaRaw, pointRaw] = await Promise.all([
+      fetchRaw('/api/entitlement/quota'),
+      fetchRaw('/api/entitlement/point'),
+    ]);
+
+    res.json({ quotaEndpoint: quotaRaw, pointEndpoint: pointRaw });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // DELETE /api/accounts/:id/meta
 app.delete('/api/accounts/:id/meta', (req, res) => {
   try {
@@ -1325,6 +1750,130 @@ app.get('/api/codex/auth/url', (req, res) => {
   res.json({ url: buildAccioAuthUrl() });
 });
 
+// GET /auth/callback - Automatic redirect handler for one-click import
+app.get('/auth/callback', async (req, res) => {
+  const rawUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  try {
+    console.log('[Auth] Received automatic callback redirect, processing import...');
+    // Process the import logic directly (without needing manual paste)
+    const result = await importAccioAuthCallback(rawUrl, { validateState: true });
+    
+    // Return a beautiful success page that automatically closes or redirects
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>授权成功 - Accio Manager</title>
+        <style>
+          body { font-family: -apple-system, system-ui; background: #0a0b0f; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+          .card { background: #15161c; padding: 40px; border-radius: 20px; text-align: center; border: 1px solid #2d2e3a; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border-left: 4px solid #6c63ff; }
+          h1 { color: #6c63ff; margin-bottom: 10px; }
+          p { color: #b4b6c3; margin-bottom: 20px; }
+          .btn { background: #6c63ff; color: white; padding: 10px 30px; border-radius: 100px; text-decoration: none; font-weight: 600; display: inline-block; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>🚀 授权成功</h1>
+          <p>账号 <b>${result.name}</b> 已自动保存到 Manager。<br>你可以关闭此窗口返回程序。</p>
+          <a href="/" class="btn">回到首页</a>
+          <script>
+            // Attempt to focus or notify opener (if any), then redirect home after 2s
+            setTimeout(() => { location.href = '/'; }, 3000);
+          </script>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (e) {
+    res.status(400).send(`授权失败: ${e.message}`);
+  }
+});
+
+// POST /api/auth/import-from-folder - Migrate data from another directory
+app.post('/api/auth/import-from-folder', async (req, res) => {
+  const { directoryPath } = req.body;
+  if (!directoryPath || !fs.existsSync(directoryPath)) {
+    return res.status(400).json({ error: '路径不存在或无效' });
+  }
+
+  try {
+    const metaPath = path.join(directoryPath, 'accounts_meta.json');
+    const profilesPath = path.join(directoryPath, 'profiles');
+    let importedCount = 0;
+    const currentMeta = readMeta();
+
+    if (fs.existsSync(metaPath)) {
+      const sourceMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (sourceMeta.accounts) {
+        for (const [id, account] of Object.entries(sourceMeta.accounts)) {
+          // Merge metadata
+          currentMeta.accounts[id] = {
+            ...(currentMeta.accounts[id] || {}),
+            ...account,
+          };
+          
+          // Attempt to copy physical profile from the source folder
+          const sourceProfileDir = path.join(profilesPath, id);
+          const destProfileDir = path.join(PROFILES_DIR, id);
+          if (fs.existsSync(sourceProfileDir)) {
+            const fsExtra = require('fs-extra');
+            await fsExtra.copy(sourceProfileDir, destProfileDir, { overwrite: true });
+          }
+          importedCount++;
+        }
+      }
+    } else {
+      // Check if it's an official Accio accounts folder
+      const possibleAccioAccounts = path.join(directoryPath, 'accounts');
+      const targetDir = fs.existsSync(possibleAccioAccounts) ? possibleAccioAccounts : directoryPath;
+      const subdirs = fs.readdirSync(targetDir);
+      
+      for (const dirName of subdirs) {
+        const fullPath = path.join(targetDir, dirName);
+        if (fs.statSync(fullPath).isDirectory() && /^\d+$/.test(dirName)) {
+           // It looks like an Accio userId folder
+           const userId = dirName;
+           let label = `导入账号 ${userId}`;
+           let email = '';
+           
+           // Try to extract rich meta from Accio's config.json
+           try {
+             const configPath = path.join(fullPath, 'config.json');
+             if (fs.existsSync(configPath)) {
+               const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+               if (config.nickName) label = config.nickName;
+               if (config.email) email = config.email;
+             }
+           } catch {}
+
+           if (!currentMeta.accounts[userId]) {
+             currentMeta.accounts[userId] = { 
+               label: label,
+               email: email,
+               quota: getDefaultQuota(),
+               tags: ['Imported', 'AccioNative']
+             };
+           }
+           const destProfileDir = path.join(PROFILES_DIR, userId);
+           const fsExtra = require('fs-extra');
+           await fsExtra.copy(fullPath, destProfileDir, { overwrite: true });
+           importedCount++;
+        }
+      }
+    }
+
+    if (importedCount > 0) {
+      writeMeta(currentMeta);
+      res.json({ success: true, count: importedCount });
+    } else {
+      res.status(400).json({ error: '在目标文件夹中未找到有效的授权数据' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/accio/auth/callback
 app.post('/api/accio/auth/callback', async (req, res) => {
   try {
@@ -1345,6 +1894,27 @@ app.post('/api/codex/auth/callback', async (req, res) => {
   }
 });
 
+// GET /api/updates/check - Version detection from Git
+app.get('/api/updates/check', async (req, res) => {
+  try {
+    const pkgUrl = 'https://raw.githubusercontent.com/z-s-f/accio-manager/main/package.json';
+    const fetchRes = await fetch(pkgUrl, { signal: getFetchTimeoutSignal(5000) });
+    if (!fetchRes.ok) throw new Error('无法连接到版本库');
+    const remotePkg = await fetchRes.json();
+    const currentVersion = require('./package.json').version;
+    
+    res.json({
+      current: currentVersion,
+      latest: remotePkg.version,
+      updateAvailable: remotePkg.version !== currentVersion,
+      platform: process.platform, // 'darwin' or 'win32'
+      releaseUrl: 'https://github.com/z-s-f/accio-manager/releases'
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/status
 app.get('/api/status', (req, res) => {
   res.json({
@@ -1353,10 +1923,14 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   ensureDataDir();
   const activeId = getActiveAccountId();
   console.log(`\n  🚀 Accio Manager is running at http://localhost:${PORT}`);
   console.log(`  📌 Active account: ${activeId || 'unknown'}`);
   console.log(`  📁 Profiles saved in: ${PROFILES_DIR}\n`);
 });
+
+// Export the http.Server instance so Electron's main process can
+// hook the 'listening' event to know when the server is ready.
+module.exports = server;

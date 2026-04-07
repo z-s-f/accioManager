@@ -11,6 +11,20 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Desktop Title Bar -->
+  <div class="window-title-bar" id="window-title-bar">
+    <div class="window-drag-region"></div>
+    <div class="window-title">
+      <span class="material-icons-round" style="font-size: 14px; color: var(--accent);">auto_awesome</span>
+      <span>Accio Manager Dashboard</span>
+    </div>
+    <div class="window-controls">
+      <button class="window-control minimize" id="win-min"><span class="material-icons-round">remove</span></button>
+      <button class="window-control maximize" id="win-max"><span class="material-icons-round">crop_square</span></button>
+      <button class="window-control close" id="win-close"><span class="material-icons-round">close</span></button>
+    </div>
+  </div>
+
   <div id="app">
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
@@ -74,26 +88,32 @@
         </div>
         
         <!-- Accio Auth Flow -->
-        <div class="oauth-section" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 20px; margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
-          <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 14px;">通过 OAuth 流程登录 Accio 服务，自动获取并保存认证文件。</p>
-          
-          <div style="background: var(--bg-input); padding: 12px; border-radius: var(--radius-sm); margin-bottom: 16px; word-break: break-all; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
-            <div style="margin-bottom: 8px; color: var(--text-primary); font-weight: 500;">授权链接:</div>
-            <div id="accio-auth-link" style="user-select: all; min-height: 48px;">正在生成授权链接...</div>
-            
-            <div style="margin-top: 12px; display: flex; gap: 8px;">
-              <button class="btn btn-sm btn-ghost" id="copy-auth-link" style="background: var(--bg-card); border: 1px solid var(--border-color);">复制链接</button>
-              <button class="btn btn-sm btn-ghost" id="open-auth-link" style="background: var(--bg-card); border: 1px solid var(--border-color);">打开链接</button>
+        <!-- Compact Accio Auth Flow -->
+        <div class="oauth-section" style="background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 20px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="material-icons-round" style="font-size: 18px; color: var(--primary);">login</span>
+              <span style="font-weight: 600; font-size: 14px;">OAuth 快捷授权</span>
+              <span style="font-size: 12px; color: var(--text-tertiary); margin-left: 8px;">引导登录并回传 Token</span>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn btn-sm btn-ghost" id="open-auth-link" style="padding: 4px 10px; font-size: 12px; border:1px solid rgba(255,255,255,0.05);">1. 去登录网页</button>
+              <button class="btn btn-sm btn-ghost" id="copy-auth-link" title="复制链接" style="padding: 4px; min-width: 32px;"><span class="material-icons-round" style="font-size: 16px;">content_copy</span></button>
             </div>
           </div>
-
-          <div style="margin-top: 16px;">
-            <div style="font-weight: 500; margin-bottom: 8px;">回调 URL</div>
-            <input type="text" id="accio-callback-url" class="form-input" placeholder="http://127.0.0.1:4097/auth/callback?accessToken=...&state=..." style="width: 100%; margin-bottom: 8px;">
-            <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px;">授权完成后，如果浏览器跳转到本地回调页，复制完整 URL 并提交到这里。</div>
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <button class="btn btn-sm" id="submit-callback-url" style="background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-primary);">提交回调 URL</button>
-              <span id="accio-auth-status" style="font-size: 12px; color: var(--text-tertiary); display: none;">等待认证中...</span>
+          
+          <div style="display: flex; gap: 10px; align-items: center; background: rgba(0,0,0,0.1); padding: 4px 4px 4px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.03);">
+            <span style="font-size: 12px; color: var(--text-tertiary); white-space: nowrap;">2. 提交回传 URL:</span>
+            <input type="text" id="accio-callback-url" class="form-input" placeholder="粘贴跳转后的完整 URL..." style="flex: 1; height: 32px; font-size: 12px; background: transparent; border: none; padding: 0;">
+            <button class="btn btn-sm btn-primary" id="submit-callback-url" style="height: 32px; padding: 0 16px; font-size: 12px;">提交解析</button>
+          </div>
+          
+          <div id="accio-auth-link" style="display:none;"></div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+            <span id="accio-auth-status" style="font-size: 11px; color: var(--text-tertiary); display:none;">准备就绪</span>
+            <div class="auth-tip" style="font-size: 10px; color: var(--warning); opacity: 0.8; display: flex; align-items: center; gap: 4px;">
+              <span class="material-icons-round" style="font-size: 12px;">info</span>
+              注意：部门账号授权若提示 [USERINFO_BACKEND_555]，请尝试切换环境或联系管理员。
             </div>
           </div>
         </div>
@@ -104,7 +124,7 @@
             <p class="section-desc">点击卡片切换当前活动账号</p>
           </div>
           <button class="btn btn-primary btn-sm" id="import-auth-btn" style="display: flex; align-items: center; gap: 4px;">
-            <span class="material-icons-round" style="font-size: 16px;">add_link</span> 导入授权链接
+            <span class="material-icons-round" style="font-size: 16px;">move_to_inbox</span> 数据迁移/导入
           </button>
         </div>
         <div class="accounts-quick-grid" id="quick-switch-grid">
