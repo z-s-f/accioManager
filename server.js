@@ -348,49 +348,17 @@ function classifyPointComponent(comp) {
 }
 
 async function fetchAccioPoints(credentials = {}) {
-  const gatewayContext = getAccioGatewayContext(credentials);
-  const pointUrl = new URL('/api/entitlement/point', ACCIO_GATEWAY_ORIGIN);
-  pointUrl.searchParams.set('accessToken', credentials.token);
-  pointUrl.searchParams.set('utdid', gatewayContext.utdid);
-  pointUrl.searchParams.set('version', gatewayContext.version);
-
-  try {
-    const fetchRes = await fetch(pointUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json, text/plain, */*',
-        'x-language': gatewayContext.language,
-        'x-utdid': gatewayContext.utdid,
-        'x-app-version': gatewayContext.version,
-        'x-os': gatewayContext.os,
-        'x-cna': gatewayContext.cna,
-        ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
-      },
-      signal: getFetchTimeoutSignal(10000), // 增加到 10 秒
-    });
-
-    if (!fetchRes.ok) {
-      console.warn(`[DEBUG Points ERR] HTTP ${fetchRes.status}`);
-      return null;
-    }
-    const payload = await fetchRes.json();
-    
-    // DEBUG: 专门开启积分明细数据抓取
-    console.log('[DEBUG Points RAW] Remote Payload:', JSON.stringify(payload, null, 2));
-
-    return (payload && payload.success) ? payload.data : null;
-  } catch (e) {
-    console.error('[DEBUG Points EXCEPTION]', e.message);
-    return null;
-  }
+  // 暂时禁用这个，我们要到 currentSubscription 看看积分明细是不是在那里
+  return null;
 }
 
-async function fetchAccioQuota(credentials = {}) {
+
+async function fetchAccioQuota(credentials = {}, subData = null) {
   if (typeof fetch === 'undefined' || !credentials.token) return null;
   const gatewayContext = getAccioGatewayContext(credentials);
   
-  // Try to fetch detailed points first as it has more breakdown
-  const pointData = await fetchAccioPoints(credentials);
+  // Use subscription quota break down if provided
+  const pointData = subData || {};
   
   const quotaUrl = new URL('/api/entitlement/quota', ACCIO_GATEWAY_ORIGIN);
   quotaUrl.searchParams.set('accessToken', credentials.token);
@@ -520,9 +488,45 @@ async function fetchAccioQuota(credentials = {}) {
 }
 
 
+async function fetchAccioRecentUsage(credentials = {}) {
+  if (typeof fetch === 'undefined' || !credentials.token) return [];
+  const gatewayContext = getAccioGatewayContext(credentials);
+  const recentUrl = new URL('/api/entitlement/queryCreditUsageTrend', ACCIO_GATEWAY_ORIGIN);
+  recentUrl.searchParams.set('accessToken', credentials.token);
+  recentUrl.searchParams.set('utdid', gatewayContext.utdid);
+  recentUrl.searchParams.set('version', gatewayContext.version);
+
+  try {
+    const fetchRes = await fetch(recentUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'x-language': gatewayContext.language,
+        'x-utdid': gatewayContext.utdid,
+        'x-app-version': gatewayContext.version,
+        'x-os': gatewayContext.os,
+        'x-cna': gatewayContext.cna,
+        ...(gatewayContext.cookie ? { 'Cookie': gatewayContext.cookie } : {}),
+      },
+      signal: getFetchTimeoutSignal(10000),
+    });
+
+    if (!fetchRes.ok) return [];
+    const payload = await fetchRes.json();
+    
+    // DEBUG: 打印最近 14 天图表数据
+    console.log('[DEBUG Trend RAW] Remote Payload:', JSON.stringify(payload, null, 2));
+
+    return (payload && payload.success && Array.isArray(payload.data)) ? payload.data : [];
+  } catch (e) {
+    return [];
+  }
+}
+
 function buildRuntimeAccountState(accountMeta = {}) {
   return {
     quota: { ...getDefaultQuota(), ...(accountMeta.quota || {}) },
+    recentUsage: accountMeta.recentUsage || [],
   };
 }
 
@@ -539,24 +543,25 @@ async function refreshStoredQuota(accountId, meta = readMeta()) {
     throw new Error('缺少可用的 Accio 远端凭证，无法刷新配额');
   }
 
-  const [liveQuota, liveSubscription, accountInfo] = await Promise.all([
-    fetchAccioQuota(existing.credentials),
-    fetchAccioSubscription(existing.credentials),
-    existing.credentials.cookie ? fetchAccioAccountInfo(existing) : Promise.resolve(null)
+  const liveSubscription = await fetchAccioSubscription(existing.credentials);
+
+  const [liveQuota, accountInfo, liveRecentUsage] = await Promise.all([
+    fetchAccioQuota(existing.credentials, liveSubscription?.raw),
+    existing.credentials.cookie ? fetchAccioAccountInfo(existing) : Promise.resolve(null),
+    fetchAccioRecentUsage(existing.credentials)
   ]);
 
   // Merge high-precision MTOP points into the quota result if available
   if (liveQuota && accountInfo) {
     if (Number.isFinite(accountInfo.remainingCredits)) {
-      // If MTOP reports a different total/used, favor MTOP or adjust logic
-      // In Accio, 'remainingCredits' is typically total - used.
-      // We keep total from Quota API but adjust used if MTOP is more 'live'
+      // Logic for adjustment
     }
   }
 
   meta.accounts[accountId] = {
     ...existing,
     quota: { ...getDefaultQuota(), ...(existing.quota || {}), ...liveQuota },
+    recentUsage: liveRecentUsage || existing.recentUsage || [],
     subscription: liveSubscription || existing.subscription || { planName: '免费套餐' },
     remoteProfile: { ...(existing.remoteProfile || {}), ...(accountInfo || {}) },
     updatedAt: new Date().toISOString(),
@@ -571,7 +576,7 @@ async function refreshStoredQuota(accountId, meta = readMeta()) {
 async function fetchAccioUsageRecords(credentials = {}) {
   if (typeof fetch === 'undefined' || !credentials.token) return [];
   const gatewayContext = getAccioGatewayContext(credentials);
-  const recordsUrl = new URL('/api/entitlement/usage/record', ACCIO_GATEWAY_ORIGIN);
+  const recordsUrl = new URL('/api/entitlement/listUserEntitlementBill', ACCIO_GATEWAY_ORIGIN);
   recordsUrl.searchParams.set('accessToken', credentials.token);
   recordsUrl.searchParams.set('utdid', gatewayContext.utdid);
   recordsUrl.searchParams.set('version', gatewayContext.version);
@@ -594,12 +599,14 @@ async function fetchAccioUsageRecords(credentials = {}) {
 
     if (!fetchRes.ok) return [];
     const payload = await fetchRes.json();
-    if (!payload || !payload.success || !payload.data || !Array.isArray(payload.data.list)) return [];
+    
+    // 我们刚才确认了这个才是使用记录列表
+    if (!payload || !payload.success || !payload.data || !Array.isArray(payload.data.dataList)) return [];
 
-    return payload.data.list.map(item => ({
-      createdAt: item.gmtCreate || item.createAt || item.time || new Date().toISOString(),
-      actionName: item.sceneName || item.actionName || item.scene || item.title || '使用 Accio',
-      pointsUsed: Math.abs(item.pointChange || item.cost || item.pointsUsed || 1)
+    return payload.data.dataList.map(item => ({
+      createdAt: item.lastBillTime || item.gmtCreate || item.createAt || new Date().toISOString(),
+      actionName: item.billName || item.useScene || item.title || '使用 Accio',
+      pointsUsed: Math.abs(item.creditAmount || item.amount || 1)
     }));
   } catch (e) {
     console.warn('Could not fetch usage records:', e.message);
@@ -632,12 +639,17 @@ async function fetchAccioSubscription(credentials = {}) {
 
     if (!fetchRes.ok) return null;
     const payload = await fetchRes.json();
+    
+    // DEBUG: 到这里来找 13/2030 这几个数字！
+    console.log('[DEBUG Sub RAW] Remote Payload:', JSON.stringify(payload, null, 2));
+    
     if (!payload || !payload.success || !payload.data) return null;
 
     return {
       planName: payload.data.planName || '未知套餐',
       status: payload.data.status || 'active',
       expireAt: payload.data.expireAt || null,
+      raw: payload.data // 返回全部方便后面提取配额
     };
   } catch (e) {
     console.warn('Could not fetch subscription info:', e.message);

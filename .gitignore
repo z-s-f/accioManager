@@ -14,3 +14,7 @@ logs/
 config/*.local.*
 config/*.secret.*
 config/private/
+
+# Build and auth assets
+dist/
+chrome-profile/

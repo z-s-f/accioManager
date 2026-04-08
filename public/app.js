@@ -1028,32 +1028,68 @@ async function openUsageDetailsModal(id) {
     document.getElementById('modal-body').innerHTML = `
       <div style="display:grid; grid-template-columns: 1fr 1.5fr; gap:20px; margin-bottom:24px;">
         <div style="background:rgba(255,255,255,0.03); padding:20px; border-radius:12px;">
-          <div style="font-size:14px; color:var(--text-tertiary); margin-bottom:12px;">本月概览</div>
-          <div style="font-size:32px; font-weight:700; margin-bottom:20px;">${acc.quota?.used || 0} <span style="font-size:16px; font-weight:400; color:var(--text-tertiary);">/ ${acc.quota?.total || 0} 积分</span></div>
+          <div style="font-size:14px; color:var(--text-tertiary); margin-bottom:16px;">本月概览</div>
           
-          <div style="display:flex; flex-direction:column; gap:12px;">
+          <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-bottom:24px; background: rgba(0,0,0,0.15); padding:14px 10px; border-radius:8px;">
+            <div style="display:flex; flex-direction:column; align-items:center; border-right:1px solid rgba(255,255,255,0.05);">
+              <span style="font-size:11px; color:var(--text-tertiary); margin-bottom:6px;">总积分</span>
+              <span style="font-size:18px; font-weight:600; color:var(--text-primary); cursor:help;" title="Total">${acc.quota?.total || 0}</span>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:center; border-right:1px solid rgba(255,255,255,0.05);">
+              <span style="font-size:11px; color:var(--text-tertiary); margin-bottom:6px;">已用积分</span>
+              <span style="font-size:18px; font-weight:600; color:var(--error); cursor:help;" title="Used">${acc.quota?.used || 0}</span>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <span style="font-size:11px; color:var(--text-tertiary); margin-bottom:6px;">可用积分</span>
+              <span style="font-size:18px; font-weight:600; color:var(--emerald); cursor:help;" title="Remaining">${Math.max(0, (acc.quota?.total || 0) - (acc.quota?.used || 0))}</span>
+            </div>
+          </div>
+          
+          <div style="font-size:12px; color:var(--text-tertiary); margin-bottom:12px;">各分项配额情况：</div>
+          <div style="display:flex; flex-direction:column; gap:12px; background: rgba(0,0,0,0.1); padding:16px; border-radius:8px;">
             <div style="display:flex; justify-content:space-between; font-size:12px;">
               <span style="color:var(--text-tertiary);">基础积分</span>
-              <span>${points.basic?.total || 0}</span>
+              <span>${points.basic?.used || 0} <span style="color:var(--text-tertiary); margin:0 2px;">/</span> ${points.basic?.total || 0}</span>
             </div>
             <div style="display:flex; justify-content:space-between; font-size:12px;">
               <span style="color:var(--text-tertiary);">限时积分</span>
-              <span style="color:var(--warning);">${points.limited?.total || 0}</span>
+              <span style="color:var(--warning);">${points.limited?.used || 0} <span style="color:var(--text-tertiary); margin:0 2px;">/</span> ${points.limited?.total || 0}</span>
             </div>
             <div style="display:flex; justify-content:space-between; font-size:12px;">
               <span style="color:var(--text-tertiary);">补充积分</span>
-              <span style="color:var(--accent);">${points.supplement?.total || 0}</span>
+              <span style="color:var(--accent);">${points.supplement?.used || 0} <span style="color:var(--text-tertiary); margin:0 2px;">/</span> ${points.supplement?.total || 0}</span>
             </div>
           </div>
         </div>
         
-        <div style="background:rgba(255,255,255,0.03); padding:20px; border-radius:12px; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-          <div style="font-size:14px; color:var(--text-tertiary); margin-bottom:20px; width:100%;">近 7 次记录消耗趋势</div>
-          <div style="height:120px; width:100%; display:flex; align-items:flex-end; gap:8px;">
-            ${records.slice(0, 7).reverse().map(r => {
-              const h = Math.min(100, (r.pointsUsed || 1) * 10);
-              return `<div style="flex:1; height:${h}%; background:var(--accent); border-radius:4px 4px 0 0; opacity:0.6;"></div>`;
-            }).join('')}
+        <div style="background:rgba(255,255,255,0.03); padding:16px; border-radius:12px; display:flex; flex-direction:column; justify-content:center; align-items:center;">
+          <div style="font-size:13px; color:var(--text-tertiary); margin-bottom:12px; width:100%;">近 14 天消耗</div>
+          <div style="height:140px; width:100%; display:flex; align-items:flex-end; gap:4px; padding-bottom: 20px; position:relative;">
+            ${(() => {
+              // Replicate the 14-day zero-fill logic from the official JS
+              const usageMap = new Map((acc.recentUsage || []).map(d => [d.date, d.creditAmount || 0]));
+              const maxAmount = Math.max(...(acc.recentUsage || []).map(d => d.creditAmount || 0), 10);
+              const days = [];
+              const now = new Date();
+              for (let i = 13; i >= 0; i--) {
+                const d = new Date(now);
+                d.setDate(d.getDate() - i);
+                const isoDate = d.toISOString().split('T')[0];
+                const displayDay = String(d.getDate()).padStart(2, '0');
+                const val = usageMap.get(isoDate) || 0;
+                days.push({ date: isoDate, displayDay, val });
+              }
+              
+              return days.map(day => {
+                const h = Math.max(2, Math.min(100, (day.val / maxAmount) * 100));
+                return `
+                  <div style="flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; height:100%; position:relative;" title="${day.date}: ${day.val}积分">
+                    <div style="width:100%; height:${h}%; background: ${day.val > 0 ? 'var(--emerald)' : 'rgba(255,255,255,0.05)'}; border-radius:3px 3px 0 0; transition:height 0.3s;"></div>
+                    <div style="position:absolute; bottom:-18px; font-size:10px; color:var(--text-tertiary); transform:scale(0.85);">${day.displayDay}</div>
+                  </div>
+                `;
+              }).join('');
+            })()}
           </div>
         </div>
       </div>

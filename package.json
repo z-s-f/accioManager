@@ -1,6 +1,6 @@
 {
   "name": "accio-manager",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Accio Multi-Account Manager - Manage, switch and track your Accio accounts",
   "license": "MIT",
   "main": "main.js",
